@@ -5,3 +5,4 @@ pytest>=8.0
 google-auth>=2.35
 google-auth-oauthlib>=1.2
 google-api-python-client>=2.140
+google-genai>=1.0
