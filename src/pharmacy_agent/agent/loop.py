@@ -11,21 +11,28 @@ tool, or stop. Each event's function call(s) are recorded as one turn in
 asset (a clean bill's short chain vs. a corrupted bill's longer one).
 
 Terminal-state interpretation (T29) comes from the model calling `finish`
-as its last action -- see terminal.py.
+as its last action; the run also stops -- and is parked, never left running
+forever -- if it exceeds `max_turns` without doing so (PRD S7.10 turn-cap
+guardrail, T30).
 """
 from __future__ import annotations
 
 import asyncio
 import dataclasses
+import logging
+
+from contextlib import aclosing
 
 from google.adk.runners import InMemoryRunner
 from google.genai import types
 
 from . import tools as agent_tools
 from .model import build_agent
-from .terminal import PENDING_PHARMACIST, finish, record_bill_result
+from .terminal import FINISH_TOOL_NAME, PENDING_PHARMACIST, finish, record_bill_result
 from ..formats.schema import Bill
 from ..validate import ValidationIssue
+
+_logger = logging.getLogger(__name__)
 
 _APP_NAME = "pharmacy-bill-agent"
 _USER_ID = "pharmacy-agent-runner"
@@ -56,6 +63,11 @@ available tool. Include a one-sentence summary of your conclusion."""
 _NO_TERMINAL_STATUS_FINDING = (
     "agent stopped without calling finish -- parked for pharmacist review"
 )
+_DEFAULT_MAX_TURNS = 15
+
+
+def _turn_cap_finding(max_turns: int) -> str:
+    return f"turn cap of {max_turns} exceeded without a conclusion -- parked for pharmacist review"
 
 
 @dataclasses.dataclass
@@ -76,7 +88,7 @@ class AgentRunResult:
     bill_doc_id: str
 
 
-async def _run_async(file_bytes: bytes, vendor_hint: str) -> AgentRunResult:
+async def _run_async(file_bytes: bytes, vendor_hint: str, max_turns: int) -> AgentRunResult:
     agent = build_agent(tools=_TOOLS)
     runner = InMemoryRunner(agent=agent, app_name=_APP_NAME)
 
@@ -90,16 +102,38 @@ async def _run_async(file_bytes: bytes, vendor_hint: str) -> AgentRunResult:
     tool_call_history: list[ToolCallRecord] = []
     turn_count = 0
     final_text = ""
+    terminal_status: str | None = None
+    turn_cap_exceeded = False
 
-    async for event in runner.run_async(user_id=_USER_ID, session_id=session.id, new_message=message):
-        calls = event.get_function_calls()
-        if calls:
-            turn_count += 1
-            tool_call_history.extend(ToolCallRecord(tool=c.name, args=dict(c.args or {})) for c in calls)
-        if event.content and event.content.parts:
-            for part in event.content.parts:
-                if part.text:
-                    final_text += part.text
+    events = runner.run_async(user_id=_USER_ID, session_id=session.id, new_message=message)
+    async with aclosing(events):
+        async for event in events:
+            calls = event.get_function_calls()
+            if calls:
+                turn_count += 1
+                tool_call_history.extend(
+                    ToolCallRecord(tool=c.name, args=dict(c.args or {})) for c in calls
+                )
+            for response in event.get_function_responses():
+                if response.name == FINISH_TOOL_NAME and response.response:
+                    terminal_status = response.response.get("status")
+            if event.content and event.content.parts:
+                for part in event.content.parts:
+                    if part.text:
+                        final_text += part.text
+
+            # Once `finish` has been called, the model has nothing left to
+            # do -- its very next turn is a plain text reply (if any) and
+            # ADK's own loop ends on its own, so no forced break is needed
+            # for that case. The turn cap (PRD S7.10) is still an
+            # unconditional hard bound, independent of `finish`, so a model
+            # that keeps calling tools after finishing can't run forever;
+            # it just isn't misreported as a cap trip if `finish` already
+            # legitimately concluded the run.
+            if turn_count >= max_turns:
+                if terminal_status is None:
+                    turn_cap_exceeded = True
+                break
 
     session = await runner.session_service.get_session(
         app_name=_APP_NAME, user_id=_USER_ID, session_id=session.id
@@ -107,13 +141,24 @@ async def _run_async(file_bytes: bytes, vendor_hint: str) -> AgentRunResult:
     bill = session.state.get("_bill")
     issues = session.state.get("_validation_issues", [])
     findings = list(session.state.get("_findings", []))
-    status = session.state.get("_terminal_status")
+    status = session.state.get("_terminal_status") or terminal_status
+
     if status is None:
         # PRD S7.10: no bill is ever silently dropped -- if the model
         # stopped without declaring a terminal state, park it rather than
         # report an undefined outcome.
         status = PENDING_PHARMACIST
-        findings.append(_NO_TERMINAL_STATUS_FINDING)
+        if turn_cap_exceeded:
+            finding = _turn_cap_finding(max_turns)
+            _logger.warning(
+                "bill parked pending_pharmacist: %s (vendor=%s invoice_no=%s)",
+                finding,
+                bill.vendor if bill else vendor_hint,
+                bill.invoice_no if bill else None,
+            )
+        else:
+            finding = _NO_TERMINAL_STATUS_FINDING
+        findings.append(finding)
 
     bill_doc_id = record_bill_result(bill, status, findings)
 
@@ -129,5 +174,5 @@ async def _run_async(file_bytes: bytes, vendor_hint: str) -> AgentRunResult:
     )
 
 
-def run_bill(file_bytes: bytes, vendor_hint: str = "") -> AgentRunResult:
-    return asyncio.run(_run_async(file_bytes, vendor_hint))
+def run_bill(file_bytes: bytes, vendor_hint: str = "", max_turns: int = _DEFAULT_MAX_TURNS) -> AgentRunResult:
+    return asyncio.run(_run_async(file_bytes, vendor_hint, max_turns))
