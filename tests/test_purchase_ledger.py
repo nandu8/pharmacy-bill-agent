@@ -81,7 +81,22 @@ def test_record_purchase_writes_one_doc_per_line_item():
                 "expiry_date": item.expiry_date,
                 "invoice_no": bill.invoice_no,
                 "purchase_date": bill.invoice_date,
+                "seeded": False,
             }
+    finally:
+        _cleanup(doc_ids)
+
+
+def test_record_purchase_marks_seeded_synthetic_history():
+    # PRD S10: synthesized history beyond the real samples must be
+    # distinguishable in the data itself, not just presented as observed.
+    bill = _make_bill(invoice_no="TEST-INV-RP-003")
+    client = get_client()
+    doc_ids = record_purchase(bill, client=client, seeded=True)
+    try:
+        for doc_id in doc_ids:
+            data = purchase_ledger_collection(client).document(doc_id).get().to_dict()
+            assert data["seeded"] is True
     finally:
         _cleanup(doc_ids)
 

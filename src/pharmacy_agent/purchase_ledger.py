@@ -30,7 +30,12 @@ def ledger_doc_id(vendor: str, invoice_no: str, item_name: str, batch_no: str) -
     return hashlib.sha256(composite.encode("utf-8")).hexdigest()
 
 
-def record_purchase(bill: Bill, client: firestore.Client | None = None) -> list[str]:
+def record_purchase(bill: Bill, client: firestore.Client | None = None, seeded: bool = False) -> list[str]:
+    """`seeded` marks synthesized (not observed) history -- PRD S10: any
+    history beyond the real sample invoices must be distinguishable in the
+    data itself, not just presented as observed. Real ingestion always
+    passes the default `False`.
+    """
     collection = purchase_ledger_collection(client)
     doc_ids: list[str] = []
     for item in bill.line_items:
@@ -46,6 +51,7 @@ def record_purchase(bill: Bill, client: firestore.Client | None = None) -> list[
             "expiry_date": item.expiry_date,
             "invoice_no": bill.invoice_no,
             "purchase_date": bill.invoice_date,
+            "seeded": seeded,
         }
         collection.document(doc_id).set(payload)
         doc_ids.append(doc_id)
