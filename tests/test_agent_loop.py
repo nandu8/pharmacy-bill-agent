@@ -1,0 +1,36 @@
+from conftest import SAMPLES_DIR
+
+from pharmacy_agent.agent.loop import run_bill
+from pharmacy_agent.firestore_client import get_client, purchase_ledger_collection
+from pharmacy_agent.purchase_ledger import ledger_doc_id
+
+
+def _cleanup_ledger(bill):
+    if bill is None:
+        return
+    client = get_client()
+    for item in bill.line_items:
+        doc_id = ledger_doc_id(bill.vendor, bill.invoice_no, item.item_name, item.batch_no)
+        purchase_ledger_collection(client).document(doc_id).delete()
+
+
+def test_run_bill_processes_a_clean_format_b_bill_end_to_end():
+    # Live Gemini turns + live Firestore -- PSPH12474.CSV is confirmed clean
+    # (see test_parse_and_normalize.py::test_format_b_csv_normalizes_and_validates),
+    # so this is a real multi-turn agent loop over real sample data, not a
+    # scripted pipeline.
+    data = (SAMPLES_DIR / "PSPH12474.CSV").read_bytes()
+    result = run_bill(data)
+    try:
+        assert result.turn_count > 0
+        tools_called = [record.tool for record in result.tool_call_history]
+        assert "detect_format" in tools_called
+        assert "parse_csv" in tools_called
+
+        assert result.bill is not None
+        assert result.bill.vendor == "SUMMIT PHARMA"
+        assert result.bill.invoice_no == "SPH12474"
+        assert result.validation_issues == []
+        assert result.final_text.strip() != ""
+    finally:
+        _cleanup_ledger(result.bill)
