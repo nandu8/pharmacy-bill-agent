@@ -18,6 +18,13 @@ from .formats.schema import Bill, LineItem
 
 DEFAULT_TOLERANCE = 0.02  # rupees; absorbs per-line rounding
 
+# Real vendor samples show clean rate:MRP ratios from ~0.20 (steep-margin
+# generics, e.g. KAINOCET TABLET at 3.92/19.50) up to ~0.86 (thin-margin
+# OTC) -- PRD S7.4. A ratio below this floor is far more likely a
+# decimal/data-entry error than a genuine margin; a rate above MRP (ratio
+# > 1.0, i.e. above the retail ceiling) is never legitimate.
+MIN_RATE_TO_MRP_RATIO = 0.05
+
 
 @dataclass
 class ValidationIssue:
@@ -46,6 +53,20 @@ def validate_line(item: LineItem, tolerance: float = DEFAULT_TOLERANCE) -> list[
             f"{item.item_name}: line_total {item.line_total} != "
             f"taxable_value+tax1+tax2 {expected_total}",
         ))
+
+    if item.mrp > 0:
+        if item.rate > item.mrp:
+            issues.append(ValidationIssue(
+                "line", None,
+                f"{item.item_name}: rate {item.rate} exceeds MRP {item.mrp} -- "
+                "implausible margin",
+            ))
+        elif item.rate < item.mrp * MIN_RATE_TO_MRP_RATIO:
+            issues.append(ValidationIssue(
+                "line", None,
+                f"{item.item_name}: rate {item.rate} is implausibly low vs MRP "
+                f"{item.mrp} (ratio {item.rate / item.mrp:.3f}) -- possible data error",
+            ))
 
     return issues
 

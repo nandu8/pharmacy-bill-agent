@@ -77,7 +77,7 @@ The reasoning engine. Get one full bill resolving end-to-end before adding more 
 
 ## Phase 6 — Validation & Investigation Logic (Day 5–6)
 
-- [ ] **T32** — Rate vs MRP plausibility check
+- [x] **T32** — Rate vs MRP plausibility check. Extended `src/pharmacy_agent/validate.py::validate_line` (not a new tool — this check runs automatically inside the existing arithmetic validation, same as T20, and surfaces through every parse tool's `validation_issues`). Flags `rate > mrp` (above the retail ceiling) and `rate < mrp * 0.05` (implausibly low, likely a decimal/data error); threshold calibrated against real sample rate:MRP ratios (0.20–0.86 observed, see `pharmacy_bill_agent_prd_v3.md` S7.4). `tests/test_validate.py` (5/5 passing). Full suite green (55/55).
 - [ ] **T33** — `cross_check_other_vendors`: same molecule, other vendors, market-shift vs. vendor-error signal
 - [ ] **T34** — Price deviation check against vendor history (runs on seeded data from T25)
 - [ ] **T35** — `find_related_document`: locate the same invoice number in another format/email
