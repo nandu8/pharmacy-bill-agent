@@ -1,0 +1,164 @@
+# Build Backlog — Pharmacy Bill Agent
+
+Derived from `pharmacy_bill_agent_prd_v3.md`. Organized into phases in build order — mostly linear, with parallelizable stories called out. Each story references the PRD section it implements. Check items off as you go; this file is the source of truth for "what's left," not the PRD (the PRD is *what to build*, this is *in what order*).
+
+**Budget:** ~2 weeks solo. Day estimates below assume ~10 real build days once demo/video/submission time is reserved at the end.
+
+---
+
+## Phase 0 — Accounts & Environment (Day 1, ~half day)
+
+Nothing downstream can start until this is done. Do it in one sitting.
+
+- [ ] **T01** — Create/confirm Google Cloud account, start no-cost trial, claim the $150 hackathon credit via the Resources-tab credit form
+- [ ] **T02** — Create the GCP project for this build; note the project ID (needed everywhere downstream)
+- [ ] **T03** — Enable required APIs: Vertex AI, Gmail API, Google Drive API, Cloud Run, Firestore, Pub/Sub, Cloud Scheduler, Cloud Trace, Cloud Logging, Secret Manager
+- [ ] **T04** — Set up Firestore in Native mode, pick a region
+- [ ] **T05** — Create Twilio account, activate WhatsApp sandbox, note the join code (PRD §9)
+- [x] **T06** — `git init` in the project, first commit (this PRD + backlog) — done locally; GitHub repo (public or private — if private, note it needs sharing with `testing@devpost.com` + `cloudhackathons@google.com` before submission, PRD §17) still needs creating and pushing
+- [x] **T07** — Add `.gitignore` covering secrets, `.env`, credentials, `__pycache__`, local venvs — before anything else gets committed (also covers raw `samples/`, see T14)
+
+---
+
+## Phase 1 — Gmail OAuth & Credential Security (Day 1–2, ~half day)
+
+Blocks all ingestion work. Do this early because of the 7-day token trap (PRD §9).
+
+- [ ] **T08** — Configure OAuth consent screen for Gmail (`gmail.readonly`, `gmail.send` scopes)
+- [ ] **T09** — Push OAuth app to "In production" publishing status (unverified is fine for one owned account) — avoids the 7-day refresh-token expiry in Testing mode
+- [ ] **T10** — Set up Secret Manager: store the Gmail refresh token, Twilio auth token, and Vertex AI service account key there — nothing in source or `.env` committed to the repo (PRD §9, §7.10)
+- [ ] **T11** — Create a scoped Cloud Run service account (Gmail, Drive, Vertex AI, Firestore, Pub/Sub only — not project editor)
+
+---
+
+## Phase 2 — Real Data & Pharmacist Input (Day 1–2, parallelizable with Phase 0–1)
+
+- [ ] **T12** — Get remaining/updated sample files from your father when available (more invoices per vendor, ideally with overlapping SKUs, to get real price-history signal — PRD §14 gap)
+- [ ] **T13** — Get daily bill volume and vendor count from your father (PRD §14 open question #1 — the only unresolved item in the PRD)
+- [x] **T14** — Write the sanitization/scrubber script: replace vendor names, GSTINs, licence numbers, phone numbers, addresses with synthetic values, preserving invoice-number shape and all prices/quantities/dates exactly (PRD §10) — run on all samples before anything touches the repo or a recording. `scripts/scrub_samples.py`, output in `samples_sanitized/` (committed); raw `samples/` stays gitignored. Verified zero residual PII across all 5 PDFs and byte-identical CSV/XLS output except the one Format B vendor-name field.
+
+---
+
+## Phase 3 — Parsing & Normalization (Day 2–3)
+
+The data layer everything else depends on. Build against the real samples in `samples/`.
+
+- [x] **T15** — `detect_format`: inspect file bytes (not extension) — distinguish CSV/delimited text, BIFF-signature binary, PDF. `src/pharmacy_agent/formats/detect.py`, keyed on the literal BIFF2 BOF magic bytes + `%PDF` + CSV header sniffing.
+- [x] **T16** — `parse_csv`: handle Format A (79-column ERP export) and Format B (H/D/F row-type, VAT/TS naming) — both dialects confirmed from real samples. `src/pharmacy_agent/formats/parse_csv.py`.
+- [x] **T17** — `parse_xls`: xlrd-based reader for the BIFF2 `.xls` files — confirmed working 5/5 on samples (PRD §7.3). `src/pharmacy_agent/formats/parse_xls.py`; regression test asserts openpyxl/default-engine still fail on these files (so detect_format's routing reason stays true).
+- [ ] **T18** — `parse_pdf_vision`: Gemini multimodal read of PDF tax invoices — needed for the reconciliation case and as last-resort fallback. **Blocked on Phase 0/1** (needs a GCP project + Vertex AI access) — not started.
+- [x] **T19** — Normalizer: map every format onto the unified schema (§10), including the generic `tax_component_1/2_label/rate/amount` fields — don't hardcode CGST/SGST. `src/pharmacy_agent/normalize.py`.
+- [x] **T20** — Per-line arithmetic validator: `taxable_value = qty×rate − discount`, `line_total = taxable_value + tax1 + tax2` — verify against real sample math (already hand-verified in the PRD; port that into code + a test). `src/pharmacy_agent/validate.py` + `tests/test_parse_and_normalize.py` (10/10 passing against `samples_sanitized/`).
+
+---
+
+## Phase 4 — Firestore Data Layer (Day 3, parallelizable with tail of Phase 3)
+
+- [ ] **T21** — Create Firestore collections: `bills`, `purchase_ledger`, `agent_runs` per the schemas in PRD §10
+- [ ] **T22** — `record_purchase`: write normalized bill to `purchase_ledger`, keyed on `invoice_no` + `vendor` (idempotent — PRD §7.10)
+- [ ] **T23** — `check_duplicate`: invoice number + vendor lookup; distinguish "already resolved" from "same number, different content" (reconciliation case)
+- [ ] **T24** — `lookup_vendor_history`: prior invoices/pricing for a vendor+item from the ledger
+- [ ] **T25** — Seed script: load real sample invoices into `purchase_ledger`; separately generate clearly-labelled synthetic history for price-drift demo data (PRD §10 — keep the two sources distinguishable in the data itself, e.g. a `seeded: true` flag)
+
+---
+
+## Phase 5 — Agent Core Loop (Day 4–5)
+
+The reasoning engine. Get one full bill resolving end-to-end before adding more tools.
+
+- [ ] **T26** — ADK project scaffold; wire Gemini 3.5 Flash as the reasoning model
+- [ ] **T27** — Define the toolbox (PRD §7.2) as ADK tool functions — start with the Phase 3/4 tools already built
+- [ ] **T28** — Agent loop: turn-by-turn tool selection, observation, decision (PRD §7.1)
+- [ ] **T29** — Terminal states: `resolved` / `pending_pharmacist` / `pending_vendor` — wire the loop to stop cleanly in each case
+- [ ] **T30** — Turn cap guardrail: park and notify on exhaustion rather than looping forever (PRD §7.10)
+- [ ] **T31** — **Milestone check:** one clean sample bill (e.g. Sterling Pharma CSV) goes in, resolves automatically, writes to `purchase_ledger`, with no anomalies. This is Demo Bill 1 — get it working before anything else.
+
+---
+
+## Phase 6 — Validation & Investigation Logic (Day 5–6)
+
+- [ ] **T32** — Rate vs MRP plausibility check
+- [ ] **T33** — `cross_check_other_vendors`: same molecule, other vendors, market-shift vs. vendor-error signal
+- [ ] **T34** — Price deviation check against vendor history (runs on seeded data from T25)
+- [ ] **T35** — `find_related_document`: locate the same invoice number in another format/email
+- [ ] **T36** — Reconciliation logic: same invoice number, conflicting content → treat PDF as authoritative, stage the matching version, flag the discrepancy (PRD §7.3/§7.4) — this is Demo Bill 3, and it runs entirely on real, already-verified sample data (`PH-26-49832`)
+- [ ] **T37** — Vendor-silence check (Cloud Scheduler-triggered, no incoming email) — PRD §7.8
+
+---
+
+## Phase 7 — Dispute & Communication (Day 6–7)
+
+- [ ] **T38** — `email_vendor`: resend-request mode and dispute mode — recipient always from the trusted vendor directory, never parsed from document content (PRD §7.10 guardrail)
+- [ ] **T39** — Dispute gating: implement the four conditions from PRD §7.5 (≥3 prior invoices, conclusive cross-vendor check, ₹500 floor, no duplicate dispute)
+- [ ] **T40** — `DISPUTE_REQUIRES_APPROVAL` config flag (default `false`) — PRD §7.5
+- [ ] **T41** — Twilio WhatsApp integration: `notify_pharmacist` (outbound) and `ask_pharmacist` (outbound + suspends run)
+- [ ] **T42** — Inbound WhatsApp webhook — separate entrypoint, receives replies
+- [ ] **T43** — **Milestone check:** Demo Bill 2 — seeded overcharge triggers investigation → dispute email sent → pharmacist notified, zero human involvement
+
+---
+
+## Phase 8 — Durable Pause & Resume (Day 7–8)
+
+- [ ] **T44** — Serialize run state to `agent_runs` on `ask_pharmacist`/`pending_vendor` (bill_id, line items, findings, tool-call history, open question, correlation key) — PRD §7.6
+- [ ] **T45** — Resume Cloud Run entrypoint: match inbound reply to correlation key, rehydrate state, continue the loop from the paused turn
+- [ ] **T46** — Wire the same resume mechanism to vendor resend replies (`pending_vendor` case)
+- [ ] **T47** — **Milestone check:** Demo Bill 4 — park a bill, wait, reply on WhatsApp days (or minutes) later, confirm it resumes correctly and `pending_pharmacist → resolved` on Firestore
+
+---
+
+## Phase 9 — Drive Staging & Ingestion Pipeline (Day 8–9)
+
+- [ ] **T48** — Google Drive API integration: per-vendor folder structure
+- [ ] **T49** — `stage_file`: byte-for-byte copy, original never modified (PRD §7.9)
+- [ ] **T50** — Install/confirm Drive Desktop sync on the pharmacy machine (real-world step, not code — PRD §14 #4)
+- [ ] **T51** — Gmail `watch` + Pub/Sub push subscription — replaces polling (PRD §9)
+- [ ] **T52** — Cloud Run trigger wired to the Pub/Sub push — new email → agent loop starts
+- [ ] **T53** — **Milestone check:** send a real test email with a sample attachment, confirm it triggers the full pipeline end-to-end without manual intervention
+
+---
+
+## Phase 10 — Observability & Status Page (Day 9–10)
+
+- [ ] **T54** — Export ADK trace output to Cloud Trace / Cloud Logging (PRD §8)
+- [ ] **T55** — Confirm per-bill reasoning chains are retrievable and distinguishable (short chain vs. longer investigation chain)
+- [ ] **T56** — Build the judge-facing status page (PRD §7.11): read-only Cloud Run view, lists bills with vendor/timestamp/status, links to trace
+- [ ] **T57** — Deploy the status page, confirm it's reachable without GCP IAM access
+
+---
+
+## Phase 11 — Memory & Adaptation (Day 10, can slip if time is tight)
+
+- [ ] **T58** — Write pharmacist resolutions back to Firestore, feed into future validation context (PRD §7.7) — lowest priority if the schedule slips; the four demo bills don't strictly require this to be visible on camera
+
+---
+
+## Phase 12 — Demo Prep (Day 11–12)
+
+- [ ] **T59** — Seed final price-history data for the demo (synthetic, clearly labelled per T25)
+- [ ] **T60** — Dry-run all four demo bills end-to-end, confirm timing against the §11 beat sheet
+- [ ] **T61** — Pre-stage Bill 4's parked state in Firestore before the recording session (legitimate setup, not an edit — PRD §11)
+- [ ] **T62** — Draft the architecture diagram as a real asset (not the PRD's ASCII sketch) — PRD §17
+- [ ] **T63** — Write `README.md` with spin-up instructions (local + cloud deploy) — PRD §17, required even if judges don't run it
+- [ ] **T64** — Rehearse the ~4-minute script; confirm re-auth checklist (Gmail token, Twilio sandbox join) is fresh on recording day (PRD §9, §15)
+
+---
+
+## Phase 13 — Recording & Submission (Day 13–14)
+
+- [ ] **T65** — Record the demo as a single continuous, unedited take (PRD §11)
+- [ ] **T66** — Finalize repo: confirm no secrets committed, confirm `.gitignore` caught everything, push
+- [ ] **T67** — If repo is private, share with `testing@devpost.com` and `cloudhackathons@google.com`
+- [ ] **T68** — Write the Devpost submission text (description, features, tech stack, data sources, findings/learnings) — PRD §17
+- [ ] **T69** — Submit: video, repo URL, status-page URL, architecture diagram, write-up
+- [ ] **T70** — *(Optional, bonus only)* Public blog/video post about the build, stating it was made for this hackathon
+- [ ] **T71** — *(Optional, bonus only)* Social post with `#AllThingsAgenticHackathon`
+
+---
+
+## Notes on sequencing
+
+- **Phases 0–2 can overlap** — account setup, OAuth, and pinging your father for samples/volume numbers don't block each other.
+- **Phase 5's milestone (T31) is the first real checkpoint** — a single bill resolving end-to-end. Don't move on to anomaly logic until this works, or you'll be debugging two layers at once.
+- **Phases 6–9 are the bulk of the build** and are mostly sequential because each demo bill depends on the previous phase's tools existing.
+- **Phase 11 (memory/adaptation) is the one thing safe to cut** if the schedule slips — nothing in the four-bill demo strictly requires it.
+- Reserve **Phases 12–13 as non-negotiable** — PRD, video, README, and diagram are worth as much in judging as the code itself (60% of scoring is Architectural Discipline + Demo/Production Readiness combined).

@@ -1,0 +1,36 @@
+# Secrets & credentials — never commit
+.env
+.env.*
+*.key.json
+*service-account*.json
+credentials.json
+token.json
+secrets/
+
+# Raw vendor samples contain real PII (names, GSTINs, phone numbers, bank
+# details) and must never be committed unscrubbed. Only samples_sanitized/
+# (produced by scripts/scrub_samples.py) is tracked.
+/samples/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+dist/
+build/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Local scratch
+*.log
