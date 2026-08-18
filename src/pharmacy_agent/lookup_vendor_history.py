@@ -30,6 +30,7 @@ class VendorHistoryEntry:
     expiry_date: str
     invoice_no: str
     purchase_date: str
+    seeded: bool = False
 
 
 def lookup_vendor_history(
