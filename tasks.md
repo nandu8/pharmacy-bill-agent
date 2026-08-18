@@ -66,7 +66,7 @@ The data layer everything else depends on. Build against the real samples in `sa
 
 The reasoning engine. Get one full bill resolving end-to-end before adding more tools.
 
-- [ ] **T26** — ADK project scaffold; wire Gemini 3.5 Flash as the reasoning model
+- [x] **T26** — ADK project scaffold; wire Gemini 3.5 Flash as the reasoning model. `src/pharmacy_agent/agent/model.py`: `build_agent()`/`build_model()` construct an ADK `Agent` (LlmAgent) with a `VertexGlobalGemini` subclass pinning the underlying `google.genai.Client` to the Vertex AI `global` location (same 404-on-region issue as T18). Added `google-adk` to `requirements.txt`. `tests/test_agent_model.py` (2/2 passing) — one live turn against real Vertex AI confirms the model is actually reachable, not just constructible.
 - [ ] **T27** — Define the toolbox (PRD §7.2) as ADK tool functions — start with the Phase 3/4 tools already built
 - [ ] **T28** — Agent loop: turn-by-turn tool selection, observation, decision (PRD §7.1)
 - [ ] **T29** — Terminal states: `resolved` / `pending_pharmacist` / `pending_vendor` — wire the loop to stop cleanly in each case

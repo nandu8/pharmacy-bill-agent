@@ -7,3 +7,4 @@ google-auth-oauthlib>=1.2
 google-api-python-client>=2.140
 google-genai>=1.0
 google-cloud-firestore>=2.16
+google-adk>=1.0
