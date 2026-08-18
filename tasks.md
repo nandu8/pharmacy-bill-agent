@@ -10,12 +10,12 @@ Derived from `pharmacy_bill_agent_prd_v3.md`. Organized into phases in build ord
 
 Nothing downstream can start until this is done. Do it in one sitting.
 
-- [ ] **T01** — Create/confirm Google Cloud account, start no-cost trial, claim the $150 hackathon credit via the Resources-tab credit form
-- [ ] **T02** — Create the GCP project for this build; note the project ID (needed everywhere downstream)
-- [ ] **T03** — Enable required APIs: Vertex AI, Gmail API, Google Drive API, Cloud Run, Firestore, Pub/Sub, Cloud Scheduler, Cloud Trace, Cloud Logging, Secret Manager
-- [ ] **T04** — Set up Firestore in Native mode, pick a region
-- [ ] **T05** — Create Twilio account, activate WhatsApp sandbox, note the join code (PRD §9)
-- [x] **T06** — `git init` in the project, first commit (this PRD + backlog) — done locally; GitHub repo (public or private — if private, note it needs sharing with `testing@devpost.com` + `cloudhackathons@google.com` before submission, PRD §17) still needs creating and pushing
+- [x] **T01** — Google Cloud account confirmed (`nandu0103@gmail.com`), billing account linked (`My Billing Account`, 01221D-846796-941715), standard new-account Free Trial active — ₹28,694 (~$300) credit, 0 used, expires 2026-11-17. This is the generic GCP trial, **not** the hackathon's $150 credit — those are separate and stack. Still worth claiming the hackathon one via the Resources-tab promo code for extra headroom, but not blocking
+- [x] **T02** — Created project `pharmacy-bill-agent`, billing linked, set as active gcloud config
+- [x] **T03** — Enabled: aiplatform, gmail, drive, run, firestore, pubsub, cloudscheduler, cloudtrace, logging, secretmanager APIs
+- [x] **T04** — Firestore Native mode created, region `asia-south1` (Mumbai)
+- [ ] **T05** — Create Twilio account, activate WhatsApp sandbox, note the join code (PRD §9) — manual, needs Twilio signup — **deferred by user request, doing this last** among the Phase 0/1 manual steps
+- [x] **T06** — `git init`, first commit, GitHub repo created and pushed — `origin` is `https://github.com/nandu8/pharmacy-bill-agent.git`, branch `main` up to date with `origin/main`. If the repo is private, still need to share with `testing@devpost.com` + `cloudhackathons@google.com` before submission (PRD §17, tracked as T67)
 - [x] **T07** — Add `.gitignore` covering secrets, `.env`, credentials, `__pycache__`, local venvs — before anything else gets committed (also covers raw `samples/`, see T14)
 
 ---
@@ -24,10 +24,10 @@ Nothing downstream can start until this is done. Do it in one sitting.
 
 Blocks all ingestion work. Do this early because of the 7-day token trap (PRD §9).
 
-- [ ] **T08** — Configure OAuth consent screen for Gmail (`gmail.readonly`, `gmail.send` scopes)
-- [ ] **T09** — Push OAuth app to "In production" publishing status (unverified is fine for one owned account) — avoids the 7-day refresh-token expiry in Testing mode
-- [ ] **T10** — Set up Secret Manager: store the Gmail refresh token, Twilio auth token, and Vertex AI service account key there — nothing in source or `.env` committed to the repo (PRD §9, §7.10)
-- [ ] **T11** — Create a scoped Cloud Run service account (Gmail, Drive, Vertex AI, Firestore, Pub/Sub only — not project editor)
+- [x] **T08** — OAuth consent screen configured (Google Auth Platform), scopes added: `gmail.readonly`, `gmail.send`, `drive`. Desktop OAuth client created (`credentials.json`, gitignored, not committed)
+- [x] **T09** — Published to Production via the Audience tab
+- [~] **T10** — Secret Manager: `gmail-refresh-token` populated (version 1, minted via `scripts/gmail_oauth_setup.py`) ✓. `twilio-auth-token` still empty — deferred, doing Twilio last per user request. Vertex AI uses the Cloud Run-attached service account directly, no downloaded key needed
+- [x] **T11** — Created `pharmacy-agent-sa@pharmacy-bill-agent.iam.gserviceaccount.com`, scoped to: `aiplatform.user`, `datastore.user`, `pubsub.editor`, `secretmanager.secretAccessor`, `logging.logWriter`, `cloudtrace.agent`, `run.invoker` — no project-editor role. (Gmail/Drive access is via the pharmacist's own OAuth consent in T08/T09, not this service account — personal Gmail accounts can't use domain-wide delegation.)
 
 ---
 
