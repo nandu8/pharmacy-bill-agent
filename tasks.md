@@ -54,7 +54,7 @@ The data layer everything else depends on. Build against the real samples in `sa
 
 ## Phase 4 — Firestore Data Layer (Day 3, parallelizable with tail of Phase 3)
 
-- [ ] **T21** — Create Firestore collections: `bills`, `purchase_ledger`, `agent_runs` per the schemas in PRD §10
+- [x] **T21** — Firestore collections `bills`, `purchase_ledger`, `agent_runs` per PRD §10. `src/pharmacy_agent/firestore_client.py`: client + collection accessors (project `pharmacy-bill-agent`, database `(default)`, region `asia-south1` from T04). Firestore collections are virtual (exist only while non-empty), so "creation" is verified via a live write/read/delete round-trip per collection in `tests/test_firestore_client.py` (4/4 passing) rather than a provisioning call. Added `google-cloud-firestore` to `requirements.txt`.
 - [ ] **T22** — `record_purchase`: write normalized bill to `purchase_ledger`, keyed on `invoice_no` + `vendor` (idempotent — PRD §7.10)
 - [ ] **T23** — `check_duplicate`: invoice number + vendor lookup; distinguish "already resolved" from "same number, different content" (reconciliation case)
 - [ ] **T24** — `lookup_vendor_history`: prior invoices/pricing for a vendor+item from the ledger
