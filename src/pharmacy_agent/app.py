@@ -15,10 +15,13 @@ import asyncio
 import os
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import HTMLResponse
 from google.auth.transport import requests as google_requests
 from google.oauth2 import id_token
 
 from .ingest import handle_pubsub_push
+from .status_page import list_bills, render_status_page
+from .telemetry import project_id as gcp_project_id
 from .telemetry import setup_cloud_logging, setup_tracing
 
 setup_tracing()
@@ -61,3 +64,13 @@ def health() -> dict:
     # (confirmed empirically during T52 deploy: every other path reached
     # FastAPI fine, /healthz alone came back as a GFE-branded 404).
     return {"status": "ok"}
+
+
+@app.get("/status", response_class=HTMLResponse)
+def status_page() -> str:
+    # PRD S7.11/T56: judge-facing, read-only, deployed to allow
+    # unauthenticated reads (T57) -- unlike /pubsub/push, this route needs
+    # no verification, since it exposes nothing but bill status/metadata
+    # already meant to be independently checkable without GCP IAM.
+    bills = list_bills()
+    return render_status_page(bills, project_id=gcp_project_id())

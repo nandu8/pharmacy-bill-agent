@@ -25,6 +25,16 @@ def test_health_returns_ok():
     assert response.json() == {"status": "ok"}
 
 
+def test_status_page_is_reachable_and_returns_html():
+    # T56/T57: this route must need no auth at all -- a judge without GCP
+    # IAM has to be able to open it.
+    client = TestClient(app)
+    response = client.get("/status")
+    assert response.status_code == 200
+    assert "text/html" in response.headers["content-type"]
+    assert "Pharmacy Bill Agent" in response.text
+
+
 def test_push_without_audience_configured_skips_auth_and_processes(monkeypatch):
     # No PUBSUB_PUSH_AUDIENCE set (local dev) -- verification is skipped
     # rather than locking out local testing; production always sets it.
