@@ -108,7 +108,7 @@ The reasoning engine. Get one full bill resolving end-to-end before adding more 
 
 ## Phase 9 — Drive Staging & Ingestion Pipeline (Day 8–9)
 
-- [ ] **T48** — Google Drive API integration: per-vendor folder structure
+- [x] **T48** — Google Drive API integration: per-vendor folder structure. Factored the shared OAuth credential loading out of `gmail_client.py` into `src/pharmacy_agent/google_oauth.py` (`load_credentials(scopes)`) so Drive can reuse the same refresh token (T08/T09 consent already covers `drive` scope) without duplicating the Secret Manager plumbing; `gmail_client.load_credentials()` now delegates to it. `src/pharmacy_agent/drive_client.py`: `get_root_folder_id`/`get_vendor_folder_id` are find-or-create against a root folder ("Pharmacy Bill Agent") with one subfolder per vendor — idempotent, so repeated ingestion never creates duplicate folders. Byte-for-byte staging into these folders is T49, not built here. `tests/test_drive_client.py` (3/3, live Drive API — creates real folders under a distinct test root name, trashed in cleanup); `tests/test_gmail_client.py` re-verified green after the refactor. Full suite green (112/112). T41-T43 skipped for now (blocked on Twilio account/sandbox setup, deferred per T05/T10) — moved to Phase 9, which has no Twilio dependency.
 - [ ] **T49** — `stage_file`: byte-for-byte copy, original never modified (PRD §7.9)
 - [ ] **T50** — Install/confirm Drive Desktop sync on the pharmacy machine (real-world step, not code — PRD §14 #4)
 - [ ] **T51** — Gmail `watch` + Pub/Sub push subscription — replaces polling (PRD §9)
