@@ -5,21 +5,36 @@ ADK creates spans via the global OTel TracerProvider on every LLM call and
 tool call (google/adk/telemetry/tracing.py) but ships no exporter of its
 own -- without an explicit provider, the OTel API defaults to a no-op
 provider and nothing is ever recorded. `setup_tracing` registers a provider
-that exports via the standard OTLP gRPC exporter pointed at Cloud Trace's
-native OTLP ingestion endpoint (`telemetry.googleapis.com`) -- the
-GoogleCloudPlatform/opentelemetry-operations-python project's own migration
-guide names this as the current path, since the dedicated
-`opentelemetry-exporter-gcp-trace` package (CloudTraceSpanExporter) writes
-through the legacy v2 REST API and is deprecated; its read counterpart (the
-v1 `TraceServiceClient.get_trace` API used to verify this module during
-development) turned out to depend on a legacy "trace bucket" resource this
-project doesn't have provisioned, returning 404 even after a genuinely
-successful export -- see `tests/test_telemetry.py`'s live check, which
-verifies the OTLP exporter's own SUCCESS/FAILURE return value instead of
-trying to read the trace back. `agent/loop.py` wraps each bill run in one
-outer span so a single trace id covers every turn, which is what
-`bills.trace_id` (S10 schema) records for the status page (S7.11) to link
-to.
+using `CloudTraceSpanExporter` (`opentelemetry-exporter-gcp-trace`), which
+writes via the `google-cloud-trace` v2 client rather than OTel's own OTLP
+exporter stack.
+
+That choice isn't the currently-recommended one -- the
+GoogleCloudPlatform/opentelemetry-operations-python migration guide points
+at the standard OTLP exporter pointed to Cloud Trace's native ingestion
+endpoint instead, since CloudTraceSpanExporter is deprecated -- but the OTLP
+path turned out to be a dead end for this project specifically: its
+`opentelemetry-proto` dependency hard-requires `protobuf<7.0`, which
+directly conflicts with the exact `protobuf==7.35.1` pin `requirements.txt`
+already carries for the T52 Firestore/Cloud-Run compatibility fix. Confirmed
+live with a from-scratch venv install (not just an incrementally-mutated
+one) -- `pip install -r requirements.txt` hit a hard `ResolutionImpossible`
+on that combination. `google-cloud-trace` (what CloudTraceSpanExporter
+actually calls) shares its protobuf/google-api-core stack with
+`google-cloud-firestore`, so it has no such conflict.
+
+CloudTraceSpanExporter's write path is still fully functional (confirmed
+live -- `export()` returns `SpanExportResult.SUCCESS`); only its read
+counterpart (v1 `TraceServiceClient.get_trace`, tried during development to
+verify this module) turned out to depend on a legacy "trace bucket"
+resource this project doesn't have provisioned, 404ing even after a
+genuinely successful export. `tests/test_telemetry.py`'s live check
+verifies the exporter's own SUCCESS/FAILURE return value instead of trying
+to read the trace back.
+
+`agent/loop.py` wraps each bill run in one outer span so a single trace id
+covers every turn, which is what `bills.trace_id` (S10 schema) records for
+the status page (S7.11) to link to.
 """
 from __future__ import annotations
 
@@ -27,12 +42,8 @@ import json
 import logging
 import os
 
-import google.auth
-import google.auth.transport.grpc
-import google.auth.transport.requests
-import grpc
 from opentelemetry import trace
-from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+from opentelemetry.exporter.cloud_trace import CloudTraceSpanExporter
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
@@ -40,7 +51,6 @@ from opentelemetry.sdk.trace.export import BatchSpanProcessor
 _SERVICE_NAME = "pharmacy-bill-agent"
 _PROJECT_ENV_VAR = "GOOGLE_CLOUD_PROJECT"
 _DEFAULT_PROJECT = "pharmacy-bill-agent"
-_OTLP_ENDPOINT = "telemetry.googleapis.com"
 
 _tracer_provider: TracerProvider | None = None
 _logging_configured = False
@@ -50,22 +60,8 @@ def project_id() -> str:
     return os.environ.get(_PROJECT_ENV_VAR, _DEFAULT_PROJECT)
 
 
-def build_otlp_span_exporter() -> OTLPSpanExporter:
-    """Builds an OTLPSpanExporter authenticated against Cloud Trace's OTLP
-    endpoint via the caller's ambient Google credentials (Cloud Run's
-    attached service account in production, user ADC locally) -- Cloud
-    Trace's OTLP ingestion requires a bearer token on every gRPC call, which
-    a plain OTLP exporter has no way to attach on its own."""
-    credentials, _ = google.auth.default()
-    request = google.auth.transport.requests.Request()
-    auth_metadata_plugin = google.auth.transport.grpc.AuthMetadataPlugin(
-        credentials=credentials, request=request
-    )
-    channel_creds = grpc.composite_channel_credentials(
-        grpc.ssl_channel_credentials(),
-        grpc.metadata_call_credentials(auth_metadata_plugin),
-    )
-    return OTLPSpanExporter(endpoint=_OTLP_ENDPOINT, credentials=channel_creds)
+def build_cloud_trace_span_exporter() -> CloudTraceSpanExporter:
+    return CloudTraceSpanExporter(project_id=project_id())
 
 
 def setup_tracing() -> TracerProvider:
@@ -75,15 +71,9 @@ def setup_tracing() -> TracerProvider:
     global _tracer_provider
     if _tracer_provider is not None:
         return _tracer_provider
-    # gcp.project_id is required by Cloud Trace's OTLP endpoint -- without
-    # it, ingestion rejects every span with INVALID_ARGUMENT ("Resource is
-    # missing required attribute \"gcp.project_id\"", confirmed live during
-    # development). GoogleCloudResourceDetector would supply it under Cloud
-    # Run, but not from a local machine, so it's set explicitly here to work
-    # in both places.
-    resource = Resource.create({"service.name": _SERVICE_NAME, "gcp.project_id": project_id()})
+    resource = Resource.create({"service.name": _SERVICE_NAME})
     provider = TracerProvider(resource=resource)
-    provider.add_span_processor(BatchSpanProcessor(build_otlp_span_exporter()))
+    provider.add_span_processor(BatchSpanProcessor(build_cloud_trace_span_exporter()))
     trace.set_tracer_provider(provider)
     _tracer_provider = provider
     return provider

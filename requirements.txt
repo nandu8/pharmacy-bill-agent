@@ -11,15 +11,18 @@ google-cloud-secret-manager>=2.20
 google-adk>=1.0
 fastapi>=0.110
 uvicorn[standard]>=0.30
-opentelemetry-exporter-otlp-proto-grpc>=1.30
 
-# Pinned to match google-adk's declared opentelemetry-api/-sdk range (T54):
-# opentelemetry-exporter-otlp-proto-grpc pulls in opentelemetry-sdk~=1.44.0,
-# one minor ahead of adk's stated <=1.42.1 upper bound. Empirically confirmed
-# compatible (tests/test_agent_model.py, tests/test_telemetry.py both green)
-# -- pinned explicitly so a future `pip install` doesn't silently drift.
-opentelemetry-api==1.44.0
-opentelemetry-sdk==1.44.0
+# T54: exports ADK's OTel spans to Cloud Trace. NOT the standard OTLP
+# exporter (opentelemetry-exporter-otlp-proto-grpc) -- that pulls in
+# opentelemetry-proto, which hard-requires protobuf<7.0, directly
+# conflicting with the protobuf==7.35.1 pin below (confirmed live via a
+# from-scratch venv install: pip's resolver fails outright on that
+# combination). opentelemetry-exporter-gcp-trace instead writes through the
+# google-cloud-trace client, which shares google-cloud-firestore's own
+# protobuf/google-api-core stack, so it has no such conflict. Its own
+# declared bounds (opentelemetry-api/-sdk ~=1.30, i.e. >=1.30,<2.0) are loose
+# enough to coexist with google-adk's <=1.42.1 ceiling without a fight.
+opentelemetry-exporter-gcp-trace==1.15.0
 
 # Pinned exact (T52): newer patch releases of these four (resolved fresh
 # during the Cloud Run --source build) reproduce a genuine

@@ -7,7 +7,7 @@ from opentelemetry.sdk.trace.export import SpanExportResult
 
 from pharmacy_agent.telemetry import (
     CloudLoggingFormatter,
-    build_otlp_span_exporter,
+    build_cloud_trace_span_exporter,
     current_trace_id,
     project_id,
     setup_cloud_logging,
@@ -94,25 +94,21 @@ def test_setup_cloud_logging_is_idempotent():
     assert after - before <= 1
 
 
-def test_otlp_exporter_accepts_a_real_span_from_cloud_trace():
+def test_cloud_trace_exporter_accepts_a_real_span():
     # Live check: Cloud Trace's v1 read API (`TraceServiceClient.get_trace`)
     # depends on a legacy "trace bucket" resource this project doesn't have
     # provisioned (404 "_Trace bucket not found" even after a genuinely
     # successful export, confirmed manually during development), so reading
     # the trace back isn't a reliable signal here. Exercising the exporter's
     # own synchronous SUCCESS/FAILURE return value is: it's a real network
-    # call to telemetry.googleapis.com that only succeeds with valid GCP
+    # call to Cloud Trace's v2 write API that only succeeds with valid GCP
     # auth and a project actually allowed to ingest traces.
-    provider = TracerProvider(
-        resource=Resource.create(
-            {"service.name": "telemetry-live-check", "gcp.project_id": project_id()}
-        )
-    )
+    provider = TracerProvider(resource=Resource.create({"service.name": "telemetry-live-check"}))
     tracer = provider.get_tracer(__name__)
     with tracer.start_as_current_span("telemetry-live-check-span") as span:
         span.set_attribute("check", "test_telemetry.py")
         recorded_span = span
 
-    exporter = build_otlp_span_exporter()
+    exporter = build_cloud_trace_span_exporter()
     result = exporter.export([recorded_span])
     assert result == SpanExportResult.SUCCESS
