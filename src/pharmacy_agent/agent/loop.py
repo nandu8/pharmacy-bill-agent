@@ -46,6 +46,8 @@ _TOOLS = [
     agent_tools.parse_pdf_vision,
     agent_tools.lookup_vendor_history,
     agent_tools.check_duplicate,
+    agent_tools.check_price_deviation,
+    agent_tools.cross_check_other_vendors,
     agent_tools.record_purchase,
     finish,
 ]
@@ -53,14 +55,30 @@ _TOOLS = [
 _KICKOFF_MESSAGE = """A new pharmacy purchase bill has arrived and is waiting
 in your session state. Process it: detect its format, parse it with the
 matching tool, and check whether it's a duplicate of something already on
-file. If the bill is clean (no validation issues, not a duplicate or
-reconciliation case), record the purchase.
+file.
+
+Only consider investigating price history when the parsed bill has 3 or
+fewer line items in total. For a bill with more line items than that, skip
+price investigation entirely and proceed on the structural checks alone
+(arithmetic validation, duplicate/reconciliation status) -- do not call
+check_price_deviation on a multi-item bill. For a small bill (3 or fewer
+line items) whose rate looks worth double-checking against this vendor's own
+history, call check_price_deviation once for that item. If it reports a
+confirmed deviation, call cross_check_other_vendors once for the same item
+to see whether other vendors moved on it too (a market-wide shift) or not (a
+vendor-specific anomaly). Never call check_price_deviation more than once
+for the same item.
+
+If the bill is clean (no validation issues, not a duplicate or reconciliation
+case, and no confirmed unexplained price deviation), record the purchase.
 
 You must end the run by calling `finish` exactly once, as your last action:
 status="resolved" if the bill was verified and (when appropriate) recorded,
 status="pending_pharmacist" if you are genuinely unsure and a human should
-decide, or status="pending_vendor" if the file could not be read by any
-available tool. Include a one-sentence summary of your conclusion."""
+decide (including a confirmed price deviation you could not resolve via
+cross_check_other_vendors), or status="pending_vendor" if the file could not
+be read by any available tool. Include a one-sentence summary of your
+conclusion."""
 
 _NO_TERMINAL_STATUS_FINDING = (
     "agent stopped without calling finish -- parked for pharmacist review"

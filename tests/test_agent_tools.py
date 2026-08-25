@@ -142,3 +142,40 @@ def test_record_purchase_impl_writes_ledger_docs():
 
 def test_record_purchase_impl_without_parsed_bill_returns_error():
     assert agent_tools._record_purchase_impl({}) == {"error": "no bill parsed yet -- call a parse tool first"}
+
+
+def test_check_price_deviation_impl_detects_a_confirmed_rise():
+    client = get_client()
+    doc_ids: list[str] = []
+    for i, rate in enumerate([20.0, 20.5, 21.0], start=1):
+        seed_bill = _make_bill("AT Deviation Vendor", f"AT-DEV-HIST-{i}", item_name="AT DEV ITEM", rate=rate)
+        doc_ids.extend(agent_tools.purchase_ledger.record_purchase(seed_bill, client=client))
+    try:
+        state = {"_bill": _make_bill("AT Deviation Vendor", "AT-DEV-CURRENT", item_name="AT DEV ITEM", rate=27.0)}
+        result = agent_tools._check_price_deviation_impl(state, "AT DEV ITEM", 27.0)
+        assert result["signal"] == "deviation_detected"
+        assert result["confirmed"] is True
+        assert result["prior_invoice_count"] == 3
+        assert result["reference_rate"] == 21.0
+    finally:
+        for doc_id in doc_ids:
+            purchase_ledger_collection(client).document(doc_id).delete()
+
+
+def test_check_price_deviation_impl_without_parsed_bill_returns_error():
+    result = agent_tools._check_price_deviation_impl({}, "ANYTHING", 10.0)
+    assert result == {"error": "no bill parsed yet -- call a parse tool first"}
+
+
+def test_cross_check_other_vendors_impl_uses_current_bill_vendor_and_invoice_date():
+    state = {"_bill": _make_bill("AT Cross Vendor", "AT-CROSS-001", item_name="AT CROSS ITEM", rate=10.0)}
+    result = agent_tools._cross_check_other_vendors_impl(state, "AT CROSS ITEM")
+    # No other vendor has ever purchased this made-up item -- there's
+    # nothing to compare against yet.
+    assert result["signal"] == "insufficient_data"
+    assert result["vendor_movements"] == []
+
+
+def test_cross_check_other_vendors_impl_without_parsed_bill_returns_error():
+    result = agent_tools._cross_check_other_vendors_impl({}, "ANYTHING")
+    assert result == {"error": "no bill parsed yet -- call a parse tool first"}

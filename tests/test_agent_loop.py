@@ -3,7 +3,8 @@ from conftest import SAMPLES_DIR
 from pharmacy_agent.agent.loop import run_bill
 from pharmacy_agent.agent.terminal import PENDING_PHARMACIST, RESOLVED
 from pharmacy_agent.firestore_client import bills_collection, get_client, purchase_ledger_collection
-from pharmacy_agent.purchase_ledger import ledger_doc_id, normalize_item_key
+from pharmacy_agent.formats.schema import Bill, LineItem
+from pharmacy_agent.purchase_ledger import ledger_doc_id, normalize_item_key, record_purchase
 
 
 def _cleanup(bill, bill_doc_id):
@@ -66,6 +67,114 @@ def test_run_bill_processes_a_clean_format_b_bill_end_to_end():
         assert bill_doc.to_dict()["trace_id"] == result.trace_id
     finally:
         _cleanup(result.bill, result.bill_doc_id)
+
+
+def _history_bill(vendor, invoice_no, invoice_date, item_name, rate):
+    taxable = round(rate, 2)
+    tax = round(taxable * 0.06, 2)
+    item = LineItem(
+        vendor=vendor,
+        invoice_no=invoice_no,
+        invoice_date=invoice_date,
+        item_name=item_name,
+        batch_no="AT-HIST",
+        expiry_date="2028-01-01",
+        quantity=1.0,
+        rate=rate,
+        discount=0.0,
+        taxable_value=taxable,
+        tax_component_1_label="CGST",
+        tax_component_1_rate=6.0,
+        tax_component_1_amount=tax,
+        tax_component_2_label="SGST",
+        tax_component_2_rate=6.0,
+        tax_component_2_amount=tax,
+        mrp=rate * 1.5,
+        line_total=round(taxable + 2 * tax, 2),
+        hsn_code="3004",
+        source_format="synthetic",
+    )
+    return Bill(
+        vendor=vendor,
+        invoice_no=invoice_no,
+        invoice_date=invoice_date,
+        source_format="synthetic",
+        line_items=[item],
+        total_amount=item.line_total,
+    )
+
+
+def _format_b_csv(vendor, invoice_no, invoice_date_ddmmyyyy, item_name, qty, rate, mrp):
+    taxable = round(qty * rate, 2)
+    tax = round(taxable * 0.06, 2)
+    bill_amount = round(taxable + 2 * tax, 2)
+    text = (
+        "Type, Code, Name, Packing, Quantity, Free, Selling Rate, MRP, Batch No., "
+        "Exp. Date, Discount, VAT %, VAT Amt, TS %, TS Amt, Cess, Amount,HSN,PTR ,RackNo\n"
+        f"H, Supplier,{vendor}\n"
+        f"H, Inv.No.,{invoice_no}\n"
+        f"H , Inv.Date,{invoice_date_ddmmyyyy}\n"
+        f"D,999001,{item_name},{qty}TAB,{qty},,{rate:.2f},{mrp:.2f},AT-DEV-1,12/28,,"
+        f"6.00,{tax:.2f},6.00,{tax:.2f},,{taxable:.2f},30049099,{rate:.2f},Z-1\n"
+        f"F, Bill Amount,{bill_amount:.2f}\n"
+    )
+    return text.encode("latin-1")
+
+
+def test_run_bill_takes_a_longer_investigation_chain_on_a_confirmed_price_deviation():
+    # T55: confirm a bill needing investigation produces a visibly longer,
+    # distinguishable reasoning chain (and a distinct trace id, T54) next to
+    # a clean bill's short one -- PRD S8's whole point. A dedicated
+    # single-line-item vendor/item combo (not any real sample) avoids any
+    # dependency on the T25 seed script having already run.
+    vendor = "AT Investigation Vendor"
+    item_name = "AT INVESTIGATION ITEM"
+    client = get_client()
+    seed_doc_ids: list[str] = []
+    for i, (date_iso, rate) in enumerate(
+        [("2026-05-15", 20.00), ("2026-06-15", 20.50), ("2026-07-15", 21.00)], start=1
+    ):
+        seed_bill = _history_bill(vendor, f"AT-DEV-HIST-{i}", date_iso, item_name, rate)
+        seed_doc_ids.extend(record_purchase(seed_bill, client=client))
+
+    clean_data = (SAMPLES_DIR / "PSPH12474.CSV").read_bytes()
+    deviation_data = _format_b_csv(
+        vendor, "AT-DEV-CURRENT", "20/08/2026", item_name, qty=10, rate=27.00, mrp=35.00
+    )
+
+    clean_result = None
+    deviation_result = None
+    try:
+        clean_result = run_bill(clean_data)
+        deviation_result = run_bill(deviation_data)
+
+        # Distinguishable: the investigation run calls check_price_deviation
+        # (a ~27% rise vs. the seeded history, matching PRD S7.4's worked
+        # examples), the clean run doesn't need to -- and needs strictly
+        # more turns to get there.
+        clean_tools = [r.tool for r in clean_result.tool_call_history]
+        deviation_tools = [r.tool for r in deviation_result.tool_call_history]
+        assert "check_price_deviation" not in clean_tools
+        assert "check_price_deviation" in deviation_tools
+        assert deviation_result.turn_count > clean_result.turn_count
+
+        # No other vendor has ever bought this made-up item, so
+        # cross_check_other_vendors can't conclusively call it a market
+        # move -- the agent can't autonomously resolve it and must park it.
+        assert deviation_result.status == PENDING_PHARMACIST
+
+        # Retrievable (T54): each run's whole reasoning chain lives under
+        # its own trace id, and the two runs are genuinely different traces.
+        assert clean_result.trace_id is not None
+        assert deviation_result.trace_id is not None
+        assert clean_result.trace_id != deviation_result.trace_id
+    finally:
+        for doc_id in seed_doc_ids:
+            purchase_ledger_collection(client).document(doc_id).delete()
+        if clean_result is not None:
+            _cleanup(clean_result.bill, clean_result.bill_doc_id)
+        if deviation_result is not None:
+            _cleanup(deviation_result.bill, deviation_result.bill_doc_id)
 
 
 def test_run_bill_parks_on_turn_cap_exhaustion():

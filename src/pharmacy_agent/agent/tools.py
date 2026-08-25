@@ -1,10 +1,11 @@
 """ADK toolbox (PRD S7.2 / T27): wraps the tool functions already built in
 Phase 3/4 (detect_format, parse_csv, parse_xls, parse_pdf_vision,
 lookup_vendor_history, check_duplicate, record_purchase) as ADK function
-tools. The remaining PRD S7.2 tools -- find_related_document,
-cross_check_other_vendors, stage_file, email_vendor, ask_pharmacist,
-notify_pharmacist -- depend on infrastructure from later phases (6/7/9) and
-aren't wired here.
+tools, plus the Phase 6 investigation tools (check_price_deviation,
+cross_check_other_vendors -- T55) once a bill needs more than structural
+checks. The remaining PRD S7.2 tools -- find_related_document, stage_file,
+email_vendor, ask_pharmacist, notify_pharmacist -- depend on infrastructure
+from later phases (7/9) and aren't wired here.
 
 Each tool reads/writes the run's session state (`tool_context.state`)
 instead of taking the file bytes or the parsed Bill as an LLM-visible
@@ -28,6 +29,8 @@ import dataclasses
 from google.adk.tools.tool_context import ToolContext
 
 from .. import check_duplicate as check_duplicate_mod
+from .. import check_price_deviation as check_price_deviation_mod
+from .. import cross_check_other_vendors as cross_check_other_vendors_mod
 from .. import lookup_vendor_history as lookup_vendor_history_mod
 from .. import normalize
 from .. import purchase_ledger
@@ -180,3 +183,54 @@ def record_purchase(tool_context: ToolContext) -> dict:
     Only call this once the bill has been parsed, checked for duplicates,
     and any anomalies resolved or accepted."""
     return _record_purchase_impl(tool_context.state)
+
+
+def _check_price_deviation_impl(state, item_name: str, current_rate: float) -> dict:
+    bill = state.get("_bill")
+    if bill is None:
+        return {"error": "no bill parsed yet -- call a parse tool first"}
+    result = check_price_deviation_mod.check_price_deviation(bill.vendor, item_name, current_rate)
+    return {
+        "signal": result.signal.value,
+        "current_rate": result.current_rate,
+        "reference_rate": result.reference_rate,
+        "pct_change": result.pct_change,
+        "prior_invoice_count": result.prior_invoice_count,
+        "confirmed": result.confirmed,
+    }
+
+
+def check_price_deviation(item_name: str, current_rate: float, tool_context: ToolContext) -> dict:
+    """Compare this bill's rate for an item against this vendor's own prior
+    invoices for the same item. signal is "no_history" (nothing to compare
+    against), "within_normal", or "deviation_detected" (10%+ move vs. the
+    most recent prior invoice). confirmed=true means the deviation is backed
+    by 3+ prior invoices, not a thin one-off. Only worth calling for a line
+    item you have a specific reason to double-check -- not every line on
+    every bill."""
+    return _check_price_deviation_impl(tool_context.state, item_name, current_rate)
+
+
+def _cross_check_other_vendors_impl(state, item_name: str) -> dict:
+    bill = state.get("_bill")
+    if bill is None:
+        return {"error": "no bill parsed yet -- call a parse tool first"}
+    result = cross_check_other_vendors_mod.cross_check_other_vendors(
+        bill.vendor, item_name, bill.invoice_date
+    )
+    return {
+        "signal": result.signal.value,
+        "vendor_movements": [dataclasses.asdict(m) for m in result.vendor_movements],
+    }
+
+
+def cross_check_other_vendors(item_name: str, tool_context: ToolContext) -> dict:
+    """After check_price_deviation reports a confirmed deviation, check
+    whether *other* vendors moved on the same item in the same window.
+    signal="market_movement" means at least one other vendor also raised its
+    rate (a market-wide shift, not this vendor's error).
+    signal="no_movement" means no other vendor moved -- the strongest
+    available signal that this is a vendor-specific anomaly.
+    signal="insufficient_data" means there isn't enough other-vendor history
+    for this item to tell either way."""
+    return _cross_check_other_vendors_impl(tool_context.state, item_name)
