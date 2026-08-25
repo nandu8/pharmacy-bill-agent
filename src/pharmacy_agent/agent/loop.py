@@ -25,11 +25,13 @@ from contextlib import aclosing
 
 from google.adk.runners import InMemoryRunner
 from google.genai import types
+from opentelemetry import trace as otel_trace
 
 from . import tools as agent_tools
 from .model import build_agent
 from .terminal import FINISH_TOOL_NAME, PENDING_PHARMACIST, finish, record_bill_result
 from ..formats.schema import Bill
+from ..telemetry import current_trace_id, setup_tracing
 from ..validate import ValidationIssue
 
 _logger = logging.getLogger(__name__)
@@ -86,9 +88,21 @@ class AgentRunResult:
     validation_issues: list[ValidationIssue]
     findings: list[str]
     bill_doc_id: str
+    trace_id: str | None
 
 
 async def _run_async(file_bytes: bytes, vendor_hint: str, max_turns: int) -> AgentRunResult:
+    setup_tracing()
+    tracer = otel_trace.get_tracer(__name__)
+    with tracer.start_as_current_span("process_bill"):
+        return await _run_traced(file_bytes, vendor_hint, max_turns)
+
+
+async def _run_traced(file_bytes: bytes, vendor_hint: str, max_turns: int) -> AgentRunResult:
+    # PRD S8: every bill's tool-call turns share this span's trace id (T54),
+    # so the trace recorded on the `bills` doc covers the whole run, not
+    # just whichever individual ADK-internal span happens to be current.
+    trace_id = current_trace_id()
     agent = build_agent(tools=_TOOLS)
     runner = InMemoryRunner(agent=agent, app_name=_APP_NAME)
 
@@ -160,7 +174,7 @@ async def _run_async(file_bytes: bytes, vendor_hint: str, max_turns: int) -> Age
             finding = _NO_TERMINAL_STATUS_FINDING
         findings.append(finding)
 
-    bill_doc_id = record_bill_result(bill, status, findings)
+    bill_doc_id = record_bill_result(bill, status, findings, trace_id=trace_id)
 
     return AgentRunResult(
         status=status,
@@ -171,6 +185,7 @@ async def _run_async(file_bytes: bytes, vendor_hint: str, max_turns: int) -> Age
         validation_issues=issues,
         findings=findings,
         bill_doc_id=bill_doc_id,
+        trace_id=trace_id,
     )
 
 

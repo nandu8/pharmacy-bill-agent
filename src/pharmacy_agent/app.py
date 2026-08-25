@@ -19,6 +19,10 @@ from google.auth.transport import requests as google_requests
 from google.oauth2 import id_token
 
 from .ingest import handle_pubsub_push
+from .telemetry import setup_cloud_logging, setup_tracing
+
+setup_tracing()
+setup_cloud_logging()
 
 app = FastAPI()
 

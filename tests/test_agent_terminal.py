@@ -82,3 +82,26 @@ def test_record_bill_result_without_bill_uses_status_and_null_identity():
         assert data["status"] == PENDING_VENDOR
     finally:
         bills_collection(client).document(doc_id).delete()
+
+
+def test_record_bill_result_stores_trace_id_when_given():
+    # PRD S10 schema / T54: the status page (S7.11) links a bill to its
+    # Cloud Trace reasoning chain via this field.
+    client = get_client()
+    bill = _make_bill(vendor="AT Trace Vendor", invoice_no="AT-TRACE-001")
+    doc_id = record_bill_result(bill, RESOLVED, ["ok"], client=client, trace_id="a" * 32)
+    try:
+        data = bills_collection(client).document(doc_id).get().to_dict()
+        assert data["trace_id"] == "a" * 32
+    finally:
+        bills_collection(client).document(doc_id).delete()
+
+
+def test_record_bill_result_omits_trace_id_when_not_given():
+    client = get_client()
+    doc_id = record_bill_result(None, PENDING_VENDOR, ["file unreadable"], client=client)
+    try:
+        data = bills_collection(client).document(doc_id).get().to_dict()
+        assert "trace_id" not in data
+    finally:
+        bills_collection(client).document(doc_id).delete()

@@ -42,6 +42,12 @@ def test_run_bill_processes_a_clean_format_b_bill_end_to_end():
         assert result.findings
         assert result.final_text.strip() != ""
 
+        # T54: the whole run shares one Cloud Trace id, recorded on the
+        # `bills` doc (PRD S10 schema) for the status page (S7.11) to link.
+        assert result.trace_id is not None
+        assert len(result.trace_id) == 32
+        int(result.trace_id, 16)
+
         client = get_client()
         assert result.bill.line_items
         for item in result.bill.line_items:
@@ -55,6 +61,9 @@ def test_run_bill_processes_a_clean_format_b_bill_end_to_end():
             assert payload["invoice_no"] == result.bill.invoice_no
             assert payload["normalized_item_key"] == normalize_item_key(item.item_name)
             assert payload["seeded"] is False
+
+        bill_doc = bills_collection(client).document(result.bill_doc_id).get()
+        assert bill_doc.to_dict()["trace_id"] == result.trace_id
     finally:
         _cleanup(result.bill, result.bill_doc_id)
 

@@ -11,6 +11,15 @@ google-cloud-secret-manager>=2.20
 google-adk>=1.0
 fastapi>=0.110
 uvicorn[standard]>=0.30
+opentelemetry-exporter-otlp-proto-grpc>=1.30
+
+# Pinned to match google-adk's declared opentelemetry-api/-sdk range (T54):
+# opentelemetry-exporter-otlp-proto-grpc pulls in opentelemetry-sdk~=1.44.0,
+# one minor ahead of adk's stated <=1.42.1 upper bound. Empirically confirmed
+# compatible (tests/test_agent_model.py, tests/test_telemetry.py both green)
+# -- pinned explicitly so a future `pip install` doesn't silently drift.
+opentelemetry-api==1.44.0
+opentelemetry-sdk==1.44.0
 
 # Pinned exact (T52): newer patch releases of these four (resolved fresh
 # during the Cloud Run --source build) reproduce a genuine

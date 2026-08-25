@@ -63,11 +63,16 @@ def record_bill_result(
     status: str,
     findings: list[str],
     client: firestore.Client | None = None,
+    trace_id: str | None = None,
 ) -> str:
     """Persist a run's terminal outcome. When no bill was ever parsed (the
     pending_vendor "couldn't read the file by any route" case), there is no
     vendor/invoice_no to key on, so the doc gets a fresh random id each
     time -- there is nothing to converge on yet.
+
+    trace_id (PRD S10 schema field, T54) is the Cloud Trace id of the span
+    `agent/loop.py` wraps the whole run in, so the status page (S7.11) can
+    link a bill straight to its reasoning-chain trace.
     """
     collection = bills_collection(client)
     if bill is not None:
@@ -89,5 +94,7 @@ def record_bill_result(
             "status": status,
             "findings": findings,
         }
+    if trace_id is not None:
+        payload["trace_id"] = trace_id
     collection.document(doc_id).set(payload, merge=True)
     return doc_id
