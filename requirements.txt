@@ -2,10 +2,23 @@ pandas>=2.2
 xlrd>=2.0
 pymupdf>=1.24
 pytest>=8.0
-google-auth>=2.35
+google-auth==2.56.3
 google-auth-oauthlib>=1.2
 google-api-python-client>=2.140
 google-genai>=1.0
-google-cloud-firestore>=2.16
+google-cloud-firestore==2.28.1
 google-cloud-secret-manager>=2.20
 google-adk>=1.0
+fastapi>=0.110
+uvicorn[standard]>=0.30
+
+# Pinned exact (T52): newer patch releases of these four (resolved fresh
+# during the Cloud Run --source build) reproduce a genuine
+# "Invalid database id %28default%29" Firestore error under Cloud Run's
+# compute-engine-metadata credentials specifically -- not reproducible
+# locally under user OAuth ADC. Versions below are the last confirmed-good
+# combination; bump deliberately and redeploy-test before loosening.
+google-api-core==2.34.0
+google-cloud-core==2.6.1
+protobuf==7.35.1
+proto-plus==1.28.3

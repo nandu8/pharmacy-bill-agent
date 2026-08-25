@@ -22,6 +22,14 @@ _DATABASE = os.environ.get("FIRESTORE_DATABASE", "(default)")
 
 
 def get_client() -> firestore.Client:
+    # Passing database="(default)" explicitly triggers a client-library
+    # code path that percent-encodes the parens and gets rejected server-
+    # side ("Invalid database id %28default%29") -- reproduced only under
+    # Cloud Run's compute-engine-metadata credentials, not local user ADC
+    # (confirmed during T52's deploy). Omitting the kwarg lets the SDK's
+    # own default take over, which works under both credential types.
+    if _DATABASE == "(default)":
+        return firestore.Client(project=_PROJECT)
     return firestore.Client(project=_PROJECT, database=_DATABASE)
 
 

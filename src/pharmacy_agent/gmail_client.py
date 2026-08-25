@@ -7,6 +7,8 @@ can reuse it against the same refresh token with a different scope).
 from __future__ import annotations
 
 import base64
+from email.mime.application import MIMEApplication
+from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
 from google.oauth2.credentials import Credentials
@@ -31,5 +33,29 @@ def send_email(to: str, cc: str, subject: str, body: str, service: Resource | No
     message["to"] = to
     message["cc"] = cc
     message["subject"] = subject
+    raw = base64.urlsafe_b64encode(message.as_bytes()).decode("utf-8")
+    return service.users().messages().send(userId="me", body={"raw": raw}).execute()
+
+
+def send_email_with_attachment(
+    to: str,
+    cc: str,
+    subject: str,
+    body: str,
+    filename: str,
+    file_bytes: bytes,
+    service: Resource | None = None,
+) -> dict:
+    service = service or get_service()
+    message = MIMEMultipart()
+    message["to"] = to
+    message["cc"] = cc
+    message["subject"] = subject
+    message.attach(MIMEText(body))
+
+    attachment = MIMEApplication(file_bytes)
+    attachment.add_header("Content-Disposition", "attachment", filename=filename)
+    message.attach(attachment)
+
     raw = base64.urlsafe_b64encode(message.as_bytes()).decode("utf-8")
     return service.users().messages().send(userId="me", body={"raw": raw}).execute()
