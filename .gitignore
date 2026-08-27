@@ -9,8 +9,12 @@ secrets/
 
 # Raw vendor samples contain real PII (names, GSTINs, phone numbers, bank
 # details) and must never be committed unscrubbed. Only samples_sanitized/
-# (produced by scripts/scrub_samples.py) is tracked.
+# (produced by scripts/scrub_samples.py) is tracked. The redaction mapping
+# itself necessarily contains those same real values as its "find" side, so
+# it's gitignored too -- it was accidentally committed in scrub_samples.py
+# for a while (fixed retroactively; see git history rewrite around T41).
 /samples/
+scripts/scrub_mapping.local.py
 
 # Python
 __pycache__/

@@ -23,9 +23,17 @@ Findings from inspecting the real sample set (see conversation history):
 
 Re-run this script any time samples/ changes; it always regenerates
 samples_sanitized/ from scratch.
+
+The actual redaction mapping (PDF_REDACTIONS, CSV_TEXT_REPLACEMENTS,
+FILENAME_REDACTIONS) lives in scripts/scrub_mapping.local.py, which is
+gitignored -- it necessarily contains the real PII values as the "find"
+side of each pair, so it must never be committed (this was gotten wrong for
+a while; the real values were hardcoded directly in this file and pushed
+publicly until it was caught and the history rewritten -- see T41).
 """
 from __future__ import annotations
 
+import importlib.util
 import shutil
 from pathlib import Path
 
@@ -34,83 +42,32 @@ import fitz  # pymupdf
 ROOT = Path(__file__).resolve().parent.parent
 SRC_DIR = ROOT / "samples"
 OUT_DIR = ROOT / "samples_sanitized"
+MAPPING_PATH = ROOT / "scripts" / "scrub_mapping.local.py"
 
-# Ordered longest/most-specific first, so a shorter string (e.g. a bare PAN)
-# never partially matches inside a longer one (e.g. the GSTIN containing
-# that PAN) before the longer one has been replaced.
-PDF_REDACTIONS: list[tuple[str, str]] = [
-    # --- Buyer pharmacy (shared across every vendor's documents) ---
-    ("AKCDA CODE NO ENP-000, RIVERDALE, RIVERDALE, ERNAKULAM -683599, KERALA-32",
-     "AKCDA CODE NO ENP-000, RIVERDALE, RIVERDALE, ERNAKULAM -683599, KERALA-32"),
-    ("PARAVOOR,RIVERDALE", "PARAVOOR,RIVERDALE"),
-    ("RIVERDALERiverdale", "RIVERDALERiverdale"),
-    ("RIVERDALE", "RIVERDALE"),
-    ("MERIDIAN MEDICALS", "MERIDIAN MEDICALS"),
-    ("Pin:683199", "Pin:683199"),
-    ("Phone:2411111", "Phone:2411111"),
-    ("St No:32200000000", "St No:32200000000"),
-    ("1-11/11,1-12/11/11", "1-11/11,1-12/11/11"),
-    ("AAAAA0000A", "AAAAA0000A"),
-    ("9000011111", "9000011111"),
-    ("118400,\n118500", "100000,\n100001"),
-    ("100000, 100001", "100000, 100001"),
-
-    # --- Vendor: Northfield Associates (the four .xls-twin PDFs) ---
-    ("NORTHFIELD ASSOCIATES", "NORTHFIELD ASSOCIATES"),
-    ("19/000-0,DEMO ARCADE, SAMPLE LANE ROAD, BAZAR P O", "19/000-0,DEMO ARCADE, SAMPLE LANE ROAD, BAZAR P O"),
-    ("Phone No.: 0000-0000000, 0000000", "Phone No.: 0000-0000000, 0000000"),
-    ("0000-0000000, 0000000", "0000-0000000, 0000000"),
-    ("orders@example-distributors.com", "orders@example-distributors.com"),
-    ("32AAAAA0000A1Z0", "32AAAAA0000A1Z0"),
-    ("AAAAA0000A", "AAAAA0000A"),
-    ("AAAA00000A", "AAAA00000A"),
-    ("10000000000000", "10000000000000"),
-    ("1.KL-EKM-0-000/00B/0000", "1.KL-EKM-0-000/00B/0000"),
-    ("2.KL-EKM-0-000/00B/0000", "2.KL-EKM-0-000/00B/0000"),
-    ("KL-EKM-0-000/00B/0000", "KL-EKM-0-000/00B/0000"),
-    ("KL-EKM-0-000/00B/0000", "KL-EKM-0-000/00B/0000"),
-    ("JOHN D.", "JOHN D."),
-    ("9000022222", "9000022222"),
-    ("SAMPLE BANK", "SAMPLE BANK"),
-    ("00000000000000", "00000000000000"),
-    ("SAMP0000000", "SAMP0000000"),
-    ("GREENVILLE", "GREENVILLE"),
-
-    # --- Vendor: Harbor Medicare Solutions (the standalone GSPL PDF) ---
-    ("HARBOR MEDICARE SOLUTIONS PVT. LTD.", "HARBOR MEDICARE SOLUTIONS PVT. LTD."),
-    ("00/0000 A, B, B1, C, C1, D SAMPLE ESTATE, NEAR DEMO PRESS,DEMO ROAD, , ERNAKULAM, KOCHI-682099 KERALA",
-     "00/0000 A, B, B1, C, C1, D SAMPLE ESTATE, NEAR DEMO PRESS,DEMO ROAD, , ERNAKULAM, KOCHI-682099 KERALA"),
-    # The PDF wraps this address across two lines with inconsistent spacing
-    # in different blocks, so the combined string above doesn't always match
-    # -- these shorter same-line fragments catch the rest.
-    ("00/0000 A, B, B1, C, C1, D", "00/0000 A, B, B1, C, C1, D"),
-    ("SAMPLE ESTATE", "SAMPLE ESTATE"),
-    ("DEMO PRESS", "DEMO PRESS"),
-    ("DEMO ROAD", "DEMO ROAD"),
-    ("KOCHI-682099  KERALA", "KOCHI-682099  KERALA"),
-    ("KOCHI-682099 KERALA", "KOCHI-682099 KERALA"),
-    ("0000000000, 0000000000", "0000000000, 0000000000"),
-    ("CONTACT@EXAMPLE-MEDICARE.COM", "CONTACT@EXAMPLE-MEDICARE.COM"),
-    ("32AAAAA0000B1Z0", "32AAAAA0000B1Z0"),
-    ("AAAAA0000B", "AAAAA0000B"),
-    ("WLF00B0000KL000000, WLF00B0000KL000001", "WLF00B0000KL000000, WLF00B0000KL000001"),
-    ("10000000000001", "10000000000001"),
-    ("U00000KL0000PTC000000", "U00000KL0000PTC000000"),
-    ("SAMPLE BANK TWO", "SAMPLE BANK TWO"),
-    ("000000000001", "000000000001"),
-    ("SAMP0000001", "SAMP0000001"),
-    ("ARUN K.", "ARUN K."),
-    ("MERIDIAN MEDICALS(018018)", "MERIDIAN MEDICALS(018018)"),
-]
-
-# Format B (H/D/F) CSV -- plain literal text replacement, one field.
-CSV_TEXT_REPLACEMENTS: list[tuple[str, str]] = [
-    ("SUMMIT PHARMA", "SUMMIT PHARMA"),
-]
+if not MAPPING_PATH.exists():
+    raise SystemExit(
+        f"Missing {MAPPING_PATH} -- gitignored, holds the real PII values "
+        "being redacted, and must exist locally to run this script. "
+        "Recreate it from the real samples/ files if lost; never commit it."
+    )
+# A dotted filename (scrub_mapping.local.py) isn't a valid plain `import`
+# target, so load it directly by path instead.
+_spec = importlib.util.spec_from_file_location("_scrub_mapping_local", MAPPING_PATH)
+_mapping = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_mapping)
+CSV_TEXT_REPLACEMENTS = _mapping.CSV_TEXT_REPLACEMENTS
+FILENAME_REDACTIONS = _mapping.FILENAME_REDACTIONS
+PDF_REDACTIONS = _mapping.PDF_REDACTIONS
 
 # Files confirmed (by scanning every cell) to carry no vendor/pharmacy PII
 # in their schema -- copied through byte-for-byte unchanged.
 NO_PII_SUFFIXES = (".xls",)
+
+
+def scrub_filename(name: str) -> str:
+    for old, new in FILENAME_REDACTIONS:
+        name = name.replace(old, new)
+    return name
 
 
 def scrub_pdf(src: Path, dst: Path) -> None:
@@ -151,7 +108,7 @@ def main() -> None:
     for f in sorted(SRC_DIR.iterdir()):
         if not f.is_file():
             continue
-        dst = OUT_DIR / f.name
+        dst = OUT_DIR / scrub_filename(f.name)
         suffix = f.suffix.lower()
         if suffix == ".pdf":
             scrub_pdf(f, dst)

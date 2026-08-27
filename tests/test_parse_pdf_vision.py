@@ -26,7 +26,7 @@ def test_pdf_vision_matches_xls_twin():
 
 
 def test_pdf_vision_resolves_reconciliation_case():
-    # rptGSTSALESINVOICE...pdf is Harbor Medicare's own PDF for
+    # rptGSTSALESINVOICE_HMSPL...pdf is Harbor Medicare's own PDF for
     # PH-26-49832 -- the vendor's authoritative document that resolves
     # which of the two conflicting CSV versions (13-item/2959.00 vs
     # 14-item/3268.00, see test_parse_and_normalize.py) is correct. This is
