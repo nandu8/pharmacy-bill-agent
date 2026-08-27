@@ -13,19 +13,11 @@ actually needs.
 from __future__ import annotations
 
 import json
-import os
 
 from google.auth.transport.requests import Request
-from google.cloud import secretmanager
 from google.oauth2.credentials import Credentials
 
-_PROJECT = os.environ.get("GOOGLE_CLOUD_PROJECT", "pharmacy-bill-agent")
-
-
-def _access_secret(secret_id: str, project: str = _PROJECT) -> str:
-    client = secretmanager.SecretManagerServiceClient()
-    name = f"projects/{project}/secrets/{secret_id}/versions/latest"
-    return client.access_secret_version(name=name).payload.data.decode("utf-8")
+from .secrets_client import access_secret as _access_secret
 
 
 def load_credentials(scopes: list[str]) -> Credentials:

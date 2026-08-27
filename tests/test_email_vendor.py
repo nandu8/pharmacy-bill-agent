@@ -94,7 +94,7 @@ def test_missing_pharmacist_config_does_not_send():
     log_doc_id = email_log_doc_id(vendor, "EV-INV-3", "resend")
     config_doc = client.collection("config").document("pharmacist")
     previous_pharmacist = config_doc.get()
-    previous_email = previous_pharmacist.to_dict().get("email") if previous_pharmacist.exists else None
+    previous_data = previous_pharmacist.to_dict() if previous_pharmacist.exists else None
     try:
         set_vendor_email(vendor, TEST_ADDRESS, client=client)
         config_doc.delete()
@@ -116,5 +116,5 @@ def test_missing_pharmacist_config_does_not_send():
     finally:
         vendor_directory_collection(client).document(vendor_doc_id).delete()
         client.collection("email_log").document(log_doc_id).delete()
-        if previous_email is not None:
-            config_doc.set({"email": previous_email}, merge=True)
+        if previous_data is not None:
+            config_doc.set(previous_data)

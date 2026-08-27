@@ -11,6 +11,7 @@ google-cloud-secret-manager>=2.20
 google-adk>=1.0
 fastapi>=0.110
 uvicorn[standard]>=0.30
+requests>=2.30
 
 # T54: exports ADK's OTel spans to Cloud Trace. NOT the standard OTLP
 # exporter (opentelemetry-exporter-otlp-proto-grpc) -- that pulls in

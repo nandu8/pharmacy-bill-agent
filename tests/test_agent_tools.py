@@ -179,3 +179,46 @@ def test_cross_check_other_vendors_impl_uses_current_bill_vendor_and_invoice_dat
 def test_cross_check_other_vendors_impl_without_parsed_bill_returns_error():
     result = agent_tools._cross_check_other_vendors_impl({}, "ANYTHING")
     assert result == {"error": "no bill parsed yet -- call a parse tool first"}
+
+
+def test_resolve_vendor_reference_uses_bill_when_parsed():
+    state = {"_bill": _make_bill("AT WA Vendor", "AT-WA-001")}
+    assert agent_tools._resolve_vendor_reference(state) == ("AT WA Vendor", "AT-WA-001")
+
+
+def test_resolve_vendor_reference_falls_back_to_vendor_hint_when_unparsed():
+    state = {"_vendor_hint": "AT WA Hint Vendor"}
+    assert agent_tools._resolve_vendor_reference(state) == ("AT WA Hint Vendor", "unparsed")
+    assert agent_tools._resolve_vendor_reference({}) == ("unknown", "unparsed")
+
+
+def test_notify_pharmacist_impl_delegates_with_resolved_vendor_and_reference(monkeypatch):
+    captured = {}
+
+    def fake_notify(vendor, reference, message):
+        captured["args"] = (vendor, reference, message)
+        return {"sent": True, "mode": "notify"}
+
+    monkeypatch.setattr(agent_tools.pharmacist_whatsapp_mod, "notify_pharmacist", fake_notify)
+    state = {"_bill": _make_bill("AT WA Vendor", "AT-WA-002")}
+
+    result = agent_tools._notify_pharmacist_impl(state, "Bill processed cleanly.")
+
+    assert result == {"sent": True, "mode": "notify"}
+    assert captured["args"] == ("AT WA Vendor", "AT-WA-002", "Bill processed cleanly.")
+
+
+def test_ask_pharmacist_impl_delegates_with_resolved_vendor_and_reference(monkeypatch):
+    captured = {}
+
+    def fake_ask(vendor, reference, question):
+        captured["args"] = (vendor, reference, question)
+        return {"sent": True, "mode": "ask"}
+
+    monkeypatch.setattr(agent_tools.pharmacist_whatsapp_mod, "ask_pharmacist", fake_ask)
+    state = {"_vendor_hint": "AT WA Hint Vendor"}
+
+    result = agent_tools._ask_pharmacist_impl(state, "Is this deviation expected?")
+
+    assert result == {"sent": True, "mode": "ask"}
+    assert captured["args"] == ("AT WA Hint Vendor", "unparsed", "Is this deviation expected?")

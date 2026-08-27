@@ -49,6 +49,8 @@ _TOOLS = [
     agent_tools.check_price_deviation,
     agent_tools.cross_check_other_vendors,
     agent_tools.record_purchase,
+    agent_tools.notify_pharmacist,
+    agent_tools.ask_pharmacist,
     finish,
 ]
 
@@ -71,6 +73,13 @@ for the same item.
 
 If the bill is clean (no validation issues, not a duplicate or reconciliation
 case, and no confirmed unexplained price deviation), record the purchase.
+
+Before concluding, tell the pharmacist what happened over WhatsApp: if you
+are about to finish with status="resolved", call notify_pharmacist once with
+a short confirmation of what was done. If you are about to finish with
+status="pending_pharmacist", call ask_pharmacist once with your specific
+open question instead -- never park a bill without asking a concrete
+question. status="pending_vendor" does not need either call.
 
 You must end the run by calling `finish` exactly once, as your last action:
 status="resolved" if the bill was verified and (when appropriate) recorded,

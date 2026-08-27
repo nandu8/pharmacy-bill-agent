@@ -1,9 +1,13 @@
+from google.cloud import firestore
+
 from pharmacy_agent.firestore_client import get_client
 from pharmacy_agent.vendor_directory import (
     config_collection,
     get_pharmacist_email,
+    get_pharmacist_whatsapp,
     get_vendor_email,
     set_pharmacist_email,
+    set_pharmacist_whatsapp,
     set_vendor_email,
     vendor_directory_collection,
     vendor_directory_doc_id,
@@ -47,3 +51,16 @@ def test_pharmacist_email_round_trips():
             config_collection(client).document("pharmacist").delete()
         else:
             set_pharmacist_email(previous, client=client)
+
+
+def test_pharmacist_whatsapp_round_trips():
+    client = get_client()
+    previous = get_pharmacist_whatsapp(client=client)
+    try:
+        set_pharmacist_whatsapp("+15550001111", client=client)
+        assert get_pharmacist_whatsapp(client=client) == "+15550001111"
+    finally:
+        if previous is None:
+            config_collection(client).document("pharmacist").update({"whatsapp": firestore.DELETE_FIELD})
+        else:
+            set_pharmacist_whatsapp(previous, client=client)

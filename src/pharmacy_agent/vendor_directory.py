@@ -61,3 +61,18 @@ def get_pharmacist_email(client: firestore.Client | None = None) -> str | None:
     if not doc.exists:
         return None
     return doc.to_dict().get("email")
+
+
+def set_pharmacist_whatsapp(whatsapp_number: str, client: firestore.Client | None = None) -> None:
+    client = client or get_client()
+    config_collection(client).document(PHARMACIST_CONFIG_DOC).set(
+        {"whatsapp": whatsapp_number}, merge=True
+    )
+
+
+def get_pharmacist_whatsapp(client: firestore.Client | None = None) -> str | None:
+    client = client or get_client()
+    doc = config_collection(client).document(PHARMACIST_CONFIG_DOC).get()
+    if not doc.exists:
+        return None
+    return doc.to_dict().get("whatsapp")

@@ -1,10 +1,29 @@
 from conftest import SAMPLES_DIR
 
+from pharmacy_agent.agent import tools as agent_tools
 from pharmacy_agent.agent.loop import run_bill
 from pharmacy_agent.agent.terminal import PENDING_PHARMACIST, RESOLVED
 from pharmacy_agent.firestore_client import bills_collection, get_client, purchase_ledger_collection
 from pharmacy_agent.formats.schema import Bill, LineItem
 from pharmacy_agent.purchase_ledger import ledger_doc_id, normalize_item_key, record_purchase
+
+
+def _stub_pharmacist_whatsapp(monkeypatch):
+    # T41's WhatsApp send (Meta Cloud API) shouldn't fire on every test run --
+    # a live agent-loop run genuinely calls notify_pharmacist/ask_pharmacist,
+    # so every test driving a full run stubs the send itself rather than
+    # hitting the real API (unlike Gmail, which the project's other live
+    # tests do send for real).
+    monkeypatch.setattr(
+        agent_tools.pharmacist_whatsapp_mod,
+        "notify_pharmacist",
+        lambda vendor, reference, message: {"sent": True, "mode": "notify"},
+    )
+    monkeypatch.setattr(
+        agent_tools.pharmacist_whatsapp_mod,
+        "ask_pharmacist",
+        lambda vendor, reference, question: {"sent": True, "mode": "ask"},
+    )
 
 
 def _cleanup(bill, bill_doc_id):
@@ -17,7 +36,7 @@ def _cleanup(bill, bill_doc_id):
         purchase_ledger_collection(client).document(doc_id).delete()
 
 
-def test_run_bill_processes_a_clean_format_b_bill_end_to_end():
+def test_run_bill_processes_a_clean_format_b_bill_end_to_end(monkeypatch):
     # T31 milestone check (PRD Phase 5): a clean sample bill goes in,
     # resolves automatically, and actually lands in purchase_ledger -- with
     # no anomalies. Live Gemini turns + live Firestore -- PSPH12474.CSV is
@@ -25,6 +44,7 @@ def test_run_bill_processes_a_clean_format_b_bill_end_to_end():
     # test_parse_and_normalize.py::test_format_b_csv_normalizes_and_validates),
     # so this is a real multi-turn agent loop over real sample data, not a
     # scripted pipeline.
+    _stub_pharmacist_whatsapp(monkeypatch)
     data = (SAMPLES_DIR / "PSPH12474.CSV").read_bytes()
     result = run_bill(data)
     try:
@@ -121,12 +141,13 @@ def _format_b_csv(vendor, invoice_no, invoice_date_ddmmyyyy, item_name, qty, rat
     return text.encode("latin-1")
 
 
-def test_run_bill_takes_a_longer_investigation_chain_on_a_confirmed_price_deviation():
+def test_run_bill_takes_a_longer_investigation_chain_on_a_confirmed_price_deviation(monkeypatch):
     # T55: confirm a bill needing investigation produces a visibly longer,
     # distinguishable reasoning chain (and a distinct trace id, T54) next to
     # a clean bill's short one -- PRD S8's whole point. A dedicated
     # single-line-item vendor/item combo (not any real sample) avoids any
     # dependency on the T25 seed script having already run.
+    _stub_pharmacist_whatsapp(monkeypatch)
     vendor = "AT Investigation Vendor"
     item_name = "AT INVESTIGATION ITEM"
     client = get_client()
@@ -177,13 +198,14 @@ def test_run_bill_takes_a_longer_investigation_chain_on_a_confirmed_price_deviat
             _cleanup(deviation_result.bill, deviation_result.bill_doc_id)
 
 
-def test_run_bill_parks_on_turn_cap_exhaustion():
+def test_run_bill_parks_on_turn_cap_exhaustion(monkeypatch):
     # PRD S7.10 turn-cap guardrail. The clean SUMMIT PHARMA bill genuinely
     # needs several turns (detect -> parse -> check_duplicate -> record ->
     # finish) to reach a real conclusion, so max_turns=1 is guaranteed to
     # trip the cap regardless of which tool the model picks first -- a
     # deterministic way to exercise a live cutoff without an artificial
     # infinite-loop tool.
+    _stub_pharmacist_whatsapp(monkeypatch)
     data = (SAMPLES_DIR / "PSPH12474.CSV").read_bytes()
     result = run_bill(data, max_turns=1)
     try:

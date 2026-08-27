@@ -3,9 +3,10 @@ Phase 3/4 (detect_format, parse_csv, parse_xls, parse_pdf_vision,
 lookup_vendor_history, check_duplicate, record_purchase) as ADK function
 tools, plus the Phase 6 investigation tools (check_price_deviation,
 cross_check_other_vendors -- T55) once a bill needs more than structural
-checks. The remaining PRD S7.2 tools -- find_related_document, stage_file,
-email_vendor, ask_pharmacist, notify_pharmacist -- depend on infrastructure
-from later phases (7/9) and aren't wired here.
+checks, plus the T41 WhatsApp tools (notify_pharmacist, ask_pharmacist). The
+remaining PRD S7.2 tools -- find_related_document, stage_file, email_vendor
+-- depend on infrastructure not yet wired into the loop (dispute gating,
+reconciliation) and aren't wired here.
 
 Each tool reads/writes the run's session state (`tool_context.state`)
 instead of taking the file bytes or the parsed Bill as an LLM-visible
@@ -33,6 +34,7 @@ from .. import check_price_deviation as check_price_deviation_mod
 from .. import cross_check_other_vendors as cross_check_other_vendors_mod
 from .. import lookup_vendor_history as lookup_vendor_history_mod
 from .. import normalize
+from .. import pharmacist_whatsapp as pharmacist_whatsapp_mod
 from .. import purchase_ledger
 from .. import validate
 from ..formats import detect as detect_mod
@@ -234,3 +236,36 @@ def cross_check_other_vendors(item_name: str, tool_context: ToolContext) -> dict
     signal="insufficient_data" means there isn't enough other-vendor history
     for this item to tell either way."""
     return _cross_check_other_vendors_impl(tool_context.state, item_name)
+
+
+def _resolve_vendor_reference(state) -> tuple[str, str]:
+    bill = state.get("_bill")
+    if bill is not None:
+        return bill.vendor, bill.invoice_no
+    return state.get("_vendor_hint") or "unknown", "unparsed"
+
+
+def _notify_pharmacist_impl(state, message: str) -> dict:
+    vendor, reference = _resolve_vendor_reference(state)
+    return pharmacist_whatsapp_mod.notify_pharmacist(vendor, reference, message)
+
+
+def notify_pharmacist(message: str, tool_context: ToolContext) -> dict:
+    """Send the pharmacist a WhatsApp message: a short confirmation that a
+    bill was processed, or notice of an autonomous action already taken.
+    Outbound only -- does not end the run. Call this once, before
+    finish(status="resolved", ...)."""
+    return _notify_pharmacist_impl(tool_context.state, message)
+
+
+def _ask_pharmacist_impl(state, question: str) -> dict:
+    vendor, reference = _resolve_vendor_reference(state)
+    return pharmacist_whatsapp_mod.ask_pharmacist(vendor, reference, question)
+
+
+def ask_pharmacist(question: str, tool_context: ToolContext) -> dict:
+    """Send the pharmacist one specific, targeted WhatsApp question when you
+    are genuinely unsure and a human needs to decide. Call this once, before
+    finish(status="pending_pharmacist", ...) -- never park a bill without
+    asking a concrete question first."""
+    return _ask_pharmacist_impl(tool_context.state, question)
