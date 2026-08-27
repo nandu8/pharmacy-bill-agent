@@ -1,6 +1,14 @@
+import os
+
+import pytest
+
 from pharmacy_agent.gmail_client import get_service, load_credentials, send_email, send_email_with_attachment
 
-TEST_ADDRESS = "[redacted-personal-email]"
+# The account's own address (same one authorized via OAuth, T08/T09) -- kept
+# out of source since it's the developer's personal email; set it locally
+# to run these live-send tests.
+TEST_ADDRESS = os.environ.get("TEST_GMAIL_ADDRESS")
+pytestmark = pytest.mark.skipif(not TEST_ADDRESS, reason="TEST_GMAIL_ADDRESS not set")
 
 
 def test_load_credentials_refreshes_a_usable_access_token():

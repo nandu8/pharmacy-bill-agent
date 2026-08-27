@@ -1,3 +1,7 @@
+import os
+
+import pytest
+
 from pharmacy_agent.email_vendor import email_log_doc_id, email_vendor
 from pharmacy_agent.firestore_client import get_client
 from pharmacy_agent.vendor_directory import (
@@ -7,7 +11,10 @@ from pharmacy_agent.vendor_directory import (
     vendor_directory_doc_id,
 )
 
-TEST_ADDRESS = "[redacted-personal-email]"
+# The account's own address (same one authorized via OAuth, T08/T09) -- kept
+# out of source since it's the developer's personal email; set it locally to
+# run the live-send test below.
+TEST_ADDRESS = os.environ.get("TEST_GMAIL_ADDRESS")
 
 
 def test_unknown_vendor_does_not_send_and_is_not_logged():
@@ -32,6 +39,7 @@ def test_unknown_vendor_does_not_send_and_is_not_logged():
         client.collection("email_log").document(log_doc_id).delete()
 
 
+@pytest.mark.skipif(not TEST_ADDRESS, reason="TEST_GMAIL_ADDRESS not set")
 def test_resend_and_dispute_send_live_and_dedupe_on_repeat():
     client = get_client()
     vendor = "EV Live Vendor"
@@ -96,7 +104,7 @@ def test_missing_pharmacist_config_does_not_send():
     previous_pharmacist = config_doc.get()
     previous_data = previous_pharmacist.to_dict() if previous_pharmacist.exists else None
     try:
-        set_vendor_email(vendor, TEST_ADDRESS, client=client)
+        set_vendor_email(vendor, "placeholder@example.com", client=client)
         config_doc.delete()
 
         result = email_vendor(

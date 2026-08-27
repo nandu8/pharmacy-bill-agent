@@ -4,10 +4,12 @@ ask_pharmacist resolve recipients from -- never from parsed document
 content.
 
 Real vendor email addresses aren't known yet (PRD S14 open items), so every
-entry here points at [redacted-personal-email] -- the same account authorized for
-Gmail send/read in T08/T09 -- as a placeholder that keeps the send path
-real and testable without mailing an actual vendor. Swap in real addresses
-once available; nothing else in email_vendor needs to change.
+entry here points at the same account authorized for Gmail send/read in
+T08/T09 -- as a placeholder that keeps the send path real and testable
+without mailing an actual vendor. Swap in real addresses once available;
+nothing else in email_vendor needs to change. That account is the
+developer's own personal email, so it's never hardcoded in this (public)
+repo -- pass it via the PLACEHOLDER_EMAIL env var when running this script.
 
 The pharmacist's WhatsApp number is real (T05/T41) -- it's the number
 registered as a Meta WhatsApp Cloud API test recipient, so a placeholder
@@ -36,19 +38,21 @@ from pharmacy_agent.vendor_directory import (  # noqa: E402
     set_vendor_email,
 )
 
-PLACEHOLDER_EMAIL = "[redacted-personal-email]"
-
 VENDORS = ["Northfield Associates", "Harbor Medicare Solutions", "SUMMIT PHARMA"]
 
 
 def main() -> None:
     client = get_client()
-    for vendor in VENDORS:
-        set_vendor_email(vendor, PLACEHOLDER_EMAIL, client=client)
-        print(f"vendor_directory: {vendor} -> {PLACEHOLDER_EMAIL}")
+    placeholder_email = os.environ.get("PLACEHOLDER_EMAIL")
+    if not placeholder_email:
+        raise SystemExit("PLACEHOLDER_EMAIL is not set")
 
-    set_pharmacist_email(PLACEHOLDER_EMAIL, client=client)
-    print(f"config/pharmacist: email -> {PLACEHOLDER_EMAIL}")
+    for vendor in VENDORS:
+        set_vendor_email(vendor, placeholder_email, client=client)
+        print(f"vendor_directory: {vendor} -> (set from PLACEHOLDER_EMAIL)")
+
+    set_pharmacist_email(placeholder_email, client=client)
+    print("config/pharmacist: email -> (set from PLACEHOLDER_EMAIL)")
 
     pharmacist_whatsapp = os.environ.get("PHARMACIST_WHATSAPP_NUMBER")
     if pharmacist_whatsapp:

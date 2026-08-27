@@ -1,4 +1,7 @@
+import os
 import time
+
+import pytest
 
 from pharmacy_agent.firestore_client import get_client
 from pharmacy_agent.gmail_client import get_service as get_send_service
@@ -11,7 +14,10 @@ from pharmacy_agent.gmail_history import (
     set_last_history_id,
 )
 
-TEST_ADDRESS = "[redacted-personal-email]"
+# The account's own address (same one authorized via OAuth, T08/T09) -- kept
+# out of source since it's the developer's personal email; set it locally
+# to run the live-send test below.
+TEST_ADDRESS = os.environ.get("TEST_GMAIL_ADDRESS")
 
 
 def test_set_then_get_last_history_id_round_trips():
@@ -29,6 +35,7 @@ def test_set_then_get_last_history_id_round_trips():
             set_last_history_id(previous_value, client=client)
 
 
+@pytest.mark.skipif(not TEST_ADDRESS, reason="TEST_GMAIL_ADDRESS not set")
 def test_fetch_new_attachments_finds_a_real_sent_attachment():
     service = get_service()
     profile = service.users().getProfile(userId="me").execute()
