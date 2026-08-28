@@ -64,11 +64,15 @@ def record_bill_result(
     findings: list[str],
     client: firestore.Client | None = None,
     trace_id: str | None = None,
+    fallback_doc_id: str | None = None,
 ) -> str:
     """Persist a run's terminal outcome. When no bill was ever parsed (the
     pending_vendor "couldn't read the file by any route" case), there is no
-    vendor/invoice_no to key on, so the doc gets a fresh random id each
-    time -- there is nothing to converge on yet.
+    vendor/invoice_no to key on, so the doc uses `fallback_doc_id` if one was
+    given -- T46's resend resume passes its original placeholder id here so
+    a repeat unreadable resend keeps converging on the same doc instead of
+    spawning a fresh one each retry -- or a fresh random id otherwise (a
+    brand new pending_vendor park has nothing to converge on yet).
 
     trace_id (PRD S10 schema field, T54) is the Cloud Trace id of the span
     `agent/loop.py` wraps the whole run in, so the status page (S7.11) can
@@ -87,7 +91,7 @@ def record_bill_result(
             "findings": findings,
         }
     else:
-        doc_id = uuid.uuid4().hex
+        doc_id = fallback_doc_id or uuid.uuid4().hex
         payload = {
             "vendor": None,
             "invoice_number": None,

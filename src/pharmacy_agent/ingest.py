@@ -11,6 +11,14 @@ is safe here because every downstream write (record_purchase, bills,
 email_log) is already idempotent on vendor+invoice_no (S7.10) -- a
 reprocessed attachment just converges on the same docs rather than
 duplicating them.
+
+T46/PRD S7.6: before treating a new attachment as a brand new bill, check
+whether it's actually a vendor's resend of a bill parked pending_vendor
+(the earlier attempt was unreadable by any parser) -- matched by sender
+address (resume_state.find_resumable_run's vendor_hint), the same signal
+ingestion already uses as the vendor identity for a fresh bill. If one
+matches, resume_bill_with_file_fn continues that parked run instead of
+starting a new one.
 """
 from __future__ import annotations
 
@@ -20,7 +28,10 @@ import json
 from google.cloud import firestore
 from googleapiclient.discovery import Resource
 
+from .agent.loop import resume_bill_with_file as _default_resume_bill_with_file
 from .agent.loop import run_bill as _default_run_bill
+from .agent.resume_state import find_resumable_run
+from .agent.terminal import PENDING_VENDOR
 from .firestore_client import get_client
 from .gmail_history import fetch_new_attachments, get_last_history_id, set_last_history_id
 
@@ -35,6 +46,7 @@ def handle_pubsub_push(
     gmail_service: Resource | None = None,
     firestore_client: firestore.Client | None = None,
     run_bill_fn=_default_run_bill,
+    resume_bill_with_file_fn=_default_resume_bill_with_file,
 ) -> list[dict]:
     firestore_client = firestore_client or get_client()
     notification = decode_pubsub_message(envelope)
@@ -51,7 +63,15 @@ def handle_pubsub_push(
 
     results = []
     for attachment in attachments:
-        run_result = run_bill_fn(attachment["bytes"], vendor_hint=attachment["sender"])
+        resumable = find_resumable_run(
+            client=firestore_client,
+            statuses=(PENDING_VENDOR,),
+            vendor_hint=attachment["sender"],
+        )
+        if resumable is not None:
+            run_result = resume_bill_with_file_fn(resumable["bill_id"], attachment["bytes"])
+        else:
+            run_result = run_bill_fn(attachment["bytes"], vendor_hint=attachment["sender"])
         results.append(
             {
                 "message_id": attachment["message_id"],

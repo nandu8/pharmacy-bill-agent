@@ -3,7 +3,9 @@ import json
 
 import pytest
 
-from pharmacy_agent.firestore_client import get_client
+from pharmacy_agent.agent.resume_state import serialize_run_state
+from pharmacy_agent.agent.terminal import PENDING_VENDOR
+from pharmacy_agent.firestore_client import agent_runs_collection, get_client
 from pharmacy_agent.gmail_history import GMAIL_WATCH_CONFIG_DOC
 from pharmacy_agent.ingest import decode_pubsub_message, handle_pubsub_push
 
@@ -94,6 +96,61 @@ def test_new_attachments_are_run_and_watermark_advances(monkeypatch):
         assert config_doc.get().to_dict()["last_history_id"] == "600"
     finally:
         config_doc.delete()
+
+
+def test_vendor_resend_resumes_the_matching_pending_vendor_run_instead_of_starting_fresh(monkeypatch):
+    # T46: a resend from the same sender as an already-parked
+    # pending_vendor bill should continue that run, not start a new one.
+    client = get_client()
+    config_doc = client.collection("config").document(GMAIL_WATCH_CONFIG_DOC)
+    config_doc.set({"last_history_id": "800"})
+
+    agent_run_id = serialize_run_state(
+        bill=None,
+        status=PENDING_VENDOR,
+        findings=["unreadable the first time"],
+        tool_call_history=[],
+        bill_doc_id="ingest-test-placeholder-1",
+        client=client,
+        vendor_hint="resend-vendor@example.com",
+    )
+
+    monkeypatch.setattr(
+        "pharmacy_agent.ingest.fetch_new_attachments",
+        lambda start_history_id, service=None: [
+            {
+                "message_id": "m2",
+                "sender": "resend-vendor@example.com",
+                "filename": "corrected.csv",
+                "bytes": b"corrected-bytes",
+            }
+        ],
+    )
+
+    run_calls = []
+    resume_calls = []
+
+    try:
+        results = handle_pubsub_push(
+            _envelope(history_id="801"),
+            firestore_client=client,
+            run_bill_fn=lambda file_bytes, vendor_hint="": run_calls.append((file_bytes, vendor_hint)),
+            resume_bill_with_file_fn=lambda bill_id, file_bytes: resume_calls.append((bill_id, file_bytes))
+            or {"status": "resolved"},
+        )
+        assert run_calls == []
+        assert resume_calls == [(agent_run_id, b"corrected-bytes")]
+        assert results == [
+            {
+                "message_id": "m2",
+                "sender": "resend-vendor@example.com",
+                "filename": "corrected.csv",
+                "run_result": {"status": "resolved"},
+            }
+        ]
+    finally:
+        config_doc.delete()
+        agent_runs_collection(client).document(agent_run_id).delete()
 
 
 def test_no_new_attachments_still_advances_watermark(monkeypatch):

@@ -97,6 +97,21 @@ def test_record_bill_result_stores_trace_id_when_given():
         bills_collection(client).document(doc_id).delete()
 
 
+def test_record_bill_result_without_bill_uses_fallback_doc_id_when_given():
+    # T46: a repeat unreadable resend should converge on the same
+    # placeholder doc, not spawn a fresh random one each retry.
+    client = get_client()
+    doc_id = record_bill_result(
+        None, PENDING_VENDOR, ["still unreadable"], client=client, fallback_doc_id="at-placeholder-1"
+    )
+    try:
+        assert doc_id == "at-placeholder-1"
+        data = bills_collection(client).document(doc_id).get().to_dict()
+        assert data["status"] == PENDING_VENDOR
+    finally:
+        bills_collection(client).document(doc_id).delete()
+
+
 def test_record_bill_result_omits_trace_id_when_not_given():
     client = get_client()
     doc_id = record_bill_result(None, PENDING_VENDOR, ["file unreadable"], client=client)

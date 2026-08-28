@@ -1,8 +1,8 @@
 from conftest import SAMPLES_DIR
 
 from pharmacy_agent.agent import tools as agent_tools
-from pharmacy_agent.agent.loop import resume_bill, run_bill
-from pharmacy_agent.agent.terminal import PENDING_PHARMACIST, RESOLVED
+from pharmacy_agent.agent.loop import resume_bill, resume_bill_with_file, run_bill
+from pharmacy_agent.agent.terminal import PENDING_PHARMACIST, PENDING_VENDOR, RESOLVED
 from pharmacy_agent.firestore_client import (
     agent_runs_collection,
     bills_collection,
@@ -299,3 +299,48 @@ def test_resume_bill_continues_a_parked_run_to_resolution(monkeypatch):
 
 def test_resume_bill_returns_none_for_an_unknown_agent_run_id():
     assert resume_bill("no-such-agent-run", "any reply") is None
+
+
+def test_resume_bill_with_file_reparses_a_vendor_resend_to_resolution(monkeypatch):
+    # T46/PRD S7.6: a pending_vendor park (file unreadable by any tool)
+    # resumes once the vendor resends a readable file over Gmail -- same
+    # durable-pause mechanism as T45's WhatsApp reply, but re-seeding
+    # _file_bytes and rerunning the normal parse kickoff instead of
+    # answering a question, since there was never a bill to reason over.
+    _stub_pharmacist_whatsapp(monkeypatch)
+    unreadable_data = b"this is not a recognizable bill in any known format, just plain garbage text"
+    vendor_hint = "at-resend-vendor@example.com"
+
+    parked_result = None
+    resumed_result = None
+    try:
+        parked_result = run_bill(unreadable_data, vendor_hint=vendor_hint)
+        assert parked_result.status == PENDING_VENDOR
+
+        clean_data = (SAMPLES_DIR / "PSPH12474.CSV").read_bytes()
+        resumed_result = resume_bill_with_file(parked_result.bill_doc_id, clean_data)
+
+        assert resumed_result is not None
+        assert resumed_result.status == RESOLVED
+        assert resumed_result.bill is not None
+        assert resumed_result.bill.vendor == "SUMMIT PHARMA"
+
+        # T46: the resend parsed into a real vendor/invoice_no key,
+        # different from the placeholder id the unreadable park used --
+        # the placeholder must be retired, not left behind as a phantom
+        # pending_vendor bill.
+        assert resumed_result.bill_doc_id != parked_result.bill_doc_id
+        assert not bills_collection(get_client()).document(parked_result.bill_doc_id).get().exists
+        assert not agent_runs_collection(get_client()).document(parked_result.bill_doc_id).get().exists
+
+        bill_doc = bills_collection(get_client()).document(resumed_result.bill_doc_id).get().to_dict()
+        assert bill_doc["status"] == RESOLVED
+
+        resumed_tools = [r.tool for r in resumed_result.tool_call_history]
+        assert "detect_format" in resumed_tools  # from the original unreadable attempt
+        assert "record_purchase" in resumed_tools  # from the successful resend
+    finally:
+        if resumed_result is not None:
+            _cleanup(resumed_result.bill, resumed_result.bill_doc_id)
+        elif parked_result is not None:
+            _cleanup(parked_result.bill, parked_result.bill_doc_id)

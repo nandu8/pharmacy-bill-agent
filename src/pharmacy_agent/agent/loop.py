@@ -41,6 +41,7 @@ from .resume_state import (
     deserialize_bill,
     get_agent_run,
     mark_resumed,
+    retire_placeholder,
     serialize_run_state,
 )
 from .terminal import (
@@ -128,6 +129,10 @@ concrete question.
 You must end by calling `finish` exactly once, as your last action, with a
 one-sentence summary of your conclusion."""
 
+_VENDOR_RESEND_PREAMBLE = """A vendor has resent this bill's file after the
+previous attempt could not be read (see your prior findings in session
+state, if any, for what went wrong before). """
+
 _NO_TERMINAL_STATUS_FINDING = (
     "agent stopped without calling finish -- parked for pharmacist review"
 )
@@ -214,6 +219,7 @@ async def _finalize_run(
     max_turns: int,
     vendor_hint: str = "",
     prior_tool_call_history: list[ToolCallRecord] | None = None,
+    fallback_bill_doc_id: str | None = None,
 ) -> AgentRunResult:
     session = await runner.session_service.get_session(
         app_name=_APP_NAME, user_id=_USER_ID, session_id=session_id
@@ -240,7 +246,9 @@ async def _finalize_run(
             finding = _NO_TERMINAL_STATUS_FINDING
         findings.append(finding)
 
-    bill_doc_id = record_bill_result(bill, status, findings, trace_id=trace_id)
+    bill_doc_id = record_bill_result(
+        bill, status, findings, trace_id=trace_id, fallback_doc_id=fallback_bill_doc_id
+    )
 
     # T44/T45: the full history across every pause/resume cycle, not just
     # this segment's turns -- a run resumed a second time still needs to see
@@ -252,7 +260,9 @@ async def _finalize_run(
         # only in this process's memory -- a later inbound reply (T45/T46)
         # needs the full tool-call history and open question to resume from
         # precisely this turn, on a different container, possibly days later.
-        serialize_run_state(bill, status, findings, full_tool_call_history, bill_doc_id)
+        serialize_run_state(
+            bill, status, findings, full_tool_call_history, bill_doc_id, vendor_hint=vendor_hint
+        )
 
     return AgentRunResult(
         status=status,
@@ -341,6 +351,7 @@ async def _run_resumed_traced(agent_run: dict, reply_text: str, max_turns: int) 
         max_turns,
         vendor_hint=vendor_hint,
         prior_tool_call_history=prior_tool_call_history,
+        fallback_bill_doc_id=agent_run["bill_id"],
     )
 
 
@@ -352,3 +363,73 @@ def resume_bill(
     the pharmacist's reply, as PRD S7.6 describes. Returns None if the given
     id no longer has a parked run (already resumed, or never existed)."""
     return asyncio.run(_resume_async(agent_run_id, reply_text, max_turns))
+
+
+async def _run_resumed_with_file_traced(
+    agent_run: dict, file_bytes: bytes, max_turns: int
+) -> AgentRunResult:
+    trace_id = current_trace_id()
+    agent = build_agent(tools=_TOOLS)
+    runner = InMemoryRunner(agent=agent, app_name=_APP_NAME)
+
+    serialized_state = agent_run["serialized_state"]
+    prior_findings = list(serialized_state.get("findings", []))
+    prior_tool_call_history = [
+        ToolCallRecord(tool=r["tool"], args=r["args"]) for r in agent_run.get("tool_call_history", [])
+    ]
+    vendor_hint = serialized_state.get("vendor_hint") or serialized_state.get("vendor") or ""
+
+    session = await runner.session_service.create_session(
+        app_name=_APP_NAME,
+        user_id=_USER_ID,
+        state={"_file_bytes": file_bytes, "_vendor_hint": vendor_hint, "_findings": prior_findings},
+    )
+
+    message = types.Content(
+        role="user", parts=[types.Part.from_text(text=_VENDOR_RESEND_PREAMBLE + _KICKOFF_MESSAGE)]
+    )
+    driven = await _drive_runner(runner, session, message, max_turns)
+    placeholder_id = agent_run["bill_id"]
+    result = await _finalize_run(
+        runner,
+        session.id,
+        driven,
+        trace_id,
+        max_turns,
+        vendor_hint=vendor_hint,
+        prior_tool_call_history=prior_tool_call_history,
+        fallback_bill_doc_id=placeholder_id,
+    )
+    if result.bill_doc_id != placeholder_id:
+        # The resend parsed successfully into a real vendor/invoice_no key
+        # this time -- retire the pending_vendor placeholder (see
+        # resume_state.retire_placeholder) so it doesn't linger as a
+        # phantom bill next to the real, now-resolved one.
+        retire_placeholder(placeholder_id)
+    return result
+
+
+async def _resume_with_file_async(
+    agent_run_id: str, file_bytes: bytes, max_turns: int
+) -> AgentRunResult | None:
+    setup_tracing()
+    agent_run = get_agent_run(agent_run_id)
+    if agent_run is None:
+        return None
+    mark_resumed(agent_run_id)
+    tracer = otel_trace.get_tracer(__name__)
+    with tracer.start_as_current_span("process_bill"):
+        return await _run_resumed_with_file_traced(agent_run, file_bytes, max_turns)
+
+
+def resume_bill_with_file(
+    agent_run_id: str, file_bytes: bytes, max_turns: int = _DEFAULT_MAX_TURNS
+) -> AgentRunResult | None:
+    """T46: resume a pending_vendor run once the vendor resends a
+    (hopefully corrected) file, matched by
+    resume_state.find_resumable_run(statuses=(PENDING_VENDOR,), vendor_hint=...).
+    Unlike resume_bill (T45's WhatsApp text reply), this re-seeds
+    _file_bytes and reruns the normal parse-and-check kickoff -- there's no
+    bill already loaded to reason over, since the whole reason for the
+    pause was that the original file couldn't be parsed by any tool."""
+    return asyncio.run(_resume_with_file_async(agent_run_id, file_bytes, max_turns))

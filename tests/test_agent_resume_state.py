@@ -76,6 +76,7 @@ def test_serialize_run_state_captures_open_question_from_ask_pharmacist_call():
         assert data["serialized_state"]["vendor"] == bill.vendor
         assert data["serialized_state"]["invoice_no"] == bill.invoice_no
         assert data["serialized_state"]["source_format"] == bill.source_format
+        assert data["serialized_state"]["vendor_hint"] == ""
         assert data["serialized_state"]["line_items"] == [
             dataclasses.asdict(bill.line_items[0])
         ]
@@ -241,3 +242,45 @@ def test_find_resumable_run_excludes_pending_vendor_by_default():
         assert run is None or run["bill_id"] != doc_id
     finally:
         agent_runs_collection(client).document(doc_id).delete()
+
+
+def test_find_resumable_run_filters_pending_vendor_by_vendor_hint():
+    # T46: a resend from "vendor-b@example.com" must not accidentally
+    # resume a different vendor's still-parked pending_vendor bill.
+    client = get_client()
+    doc_id_a = serialize_run_state(
+        bill=None,
+        status=PENDING_VENDOR,
+        findings=["unreadable from vendor a"],
+        tool_call_history=[],
+        bill_doc_id="ars-test-doc-8a",
+        client=client,
+        vendor_hint="vendor-a@example.com",
+    )
+    doc_id_b = serialize_run_state(
+        bill=None,
+        status=PENDING_VENDOR,
+        findings=["unreadable from vendor b"],
+        tool_call_history=[],
+        bill_doc_id="ars-test-doc-8b",
+        client=client,
+        vendor_hint="vendor-b@example.com",
+    )
+    try:
+        run = find_resumable_run(
+            client=client,
+            statuses=(PENDING_VENDOR,),
+            vendor_hint="vendor-b@example.com",
+        )
+        assert run is not None
+        assert run["bill_id"] == doc_id_b
+
+        no_match = find_resumable_run(
+            client=client,
+            statuses=(PENDING_VENDOR,),
+            vendor_hint="vendor-c-never-parked@example.com",
+        )
+        assert no_match is None
+    finally:
+        agent_runs_collection(client).document(doc_id_a).delete()
+        agent_runs_collection(client).document(doc_id_b).delete()

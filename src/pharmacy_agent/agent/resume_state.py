@@ -28,7 +28,7 @@ import dataclasses
 from google.cloud import firestore
 from google.cloud.firestore_v1.base_query import FieldFilter
 
-from ..firestore_client import agent_runs_collection
+from ..firestore_client import agent_runs_collection, bills_collection
 from ..formats.schema import Bill, LineItem
 from .terminal import PENDING_PHARMACIST
 
@@ -49,6 +49,7 @@ def serialize_run_state(
     tool_call_history,
     bill_doc_id: str,
     client: firestore.Client | None = None,
+    vendor_hint: str = "",
 ) -> str:
     serialized_state = {
         "vendor": bill.vendor if bill is not None else None,
@@ -59,6 +60,12 @@ def serialize_run_state(
         "line_items": [dataclasses.asdict(li) for li in bill.line_items] if bill is not None else [],
         "findings": list(findings),
         "status": status,
+        # T46: the pending_vendor case has no parsed bill at all -- the
+        # Gmail sender (ingestion context, never the document itself) is
+        # the only vendor signal find_resumable_run has to match a resend
+        # against, so it's captured even though bill.vendor already covers
+        # this when a bill did parse.
+        "vendor_hint": vendor_hint,
     }
     payload = {
         "bill_id": bill_doc_id,
@@ -107,6 +114,17 @@ def mark_resumed(bill_doc_id: str, client: firestore.Client | None = None) -> No
     )
 
 
+def retire_placeholder(bill_doc_id: str, client: firestore.Client | None = None) -> None:
+    """T46: a pending_vendor park with no bill yet keys its bills/agent_runs
+    docs on a random placeholder id (terminal.py's record_bill_result). Once
+    a resend finally parses into a real vendor/invoice_no key -- a
+    different id from that placeholder -- the placeholder is stale and
+    would otherwise linger forever as a phantom pending_vendor bill next to
+    the real, now-resolved one."""
+    bills_collection(client).document(bill_doc_id).delete()
+    agent_runs_collection(client).document(bill_doc_id).delete()
+
+
 def _pick_most_recent(docs: list) -> object | None:
     if not docs:
         return None
@@ -116,18 +134,25 @@ def _pick_most_recent(docs: list) -> object | None:
 def find_resumable_run(
     client: firestore.Client | None = None,
     statuses: tuple[str, ...] = (PENDING_PHARMACIST,),
+    vendor_hint: str | None = None,
 ) -> dict | None:
     """The most recently parked run (in one of `statuses`) that hasn't been
     resumed yet -- see the module docstring for the correlation heuristic
     and its limits. Defaults to pending_pharmacist only: a pending_vendor
     run needs a corrected file from the vendor over Gmail, not a WhatsApp
-    text reply, so resuming it is T46's job, not this one.
+    text reply (T46 passes statuses=(PENDING_VENDOR,) and its own
+    vendor_hint instead).
 
-    Filtering by status happens client-side, not as a second Firestore
-    equality clause -- a compound query needs a composite index Firestore
-    won't auto-create, and this project's whole agent_runs collection is
-    small enough that fetching the (few) unresumed docs and filtering in
-    Python is simpler than provisioning one."""
+    `vendor_hint`, when given, narrows candidates to runs parked from that
+    same Gmail sender (T46) -- without it, a resend from any vendor would
+    match whichever pending_vendor run happened to be most recent, which is
+    wrong the moment more than one vendor has a bill parked at once.
+
+    Filtering happens client-side, not as Firestore equality clauses --
+    compound queries need a composite index Firestore won't auto-create,
+    and this project's whole agent_runs collection is small enough that
+    fetching the (few) unresumed docs and filtering in Python is simpler
+    than provisioning one."""
     docs = list(
         agent_runs_collection(client)
         .where(filter=FieldFilter("resumed_at", "==", None))
@@ -136,5 +161,11 @@ def find_resumable_run(
     candidates = [
         doc for doc in docs if doc.to_dict().get("serialized_state", {}).get("status") in statuses
     ]
+    if vendor_hint is not None:
+        candidates = [
+            doc
+            for doc in candidates
+            if doc.to_dict().get("serialized_state", {}).get("vendor_hint") == vendor_hint
+        ]
     latest = _pick_most_recent(candidates)
     return latest.to_dict() if latest is not None else None
