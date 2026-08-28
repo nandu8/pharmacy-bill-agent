@@ -141,12 +141,18 @@ def test_whatsapp_webhook_receive_rejects_missing_signature(monkeypatch):
     assert response.status_code == 401
 
 
-def test_whatsapp_webhook_receive_records_valid_message(monkeypatch):
+def test_whatsapp_webhook_receive_records_valid_message_with_no_resumable_run(monkeypatch):
     monkeypatch.setattr("pharmacy_agent.app.webhook_app_secret", lambda: "test-secret")
     recorded = []
     monkeypatch.setattr(
         "pharmacy_agent.app.record_inbound_message",
         lambda message: recorded.append(message) or True,
+    )
+    monkeypatch.setattr("pharmacy_agent.app.find_resumable_run", lambda: None)
+    resume_calls = []
+    monkeypatch.setattr(
+        "pharmacy_agent.app.resume_bill",
+        lambda bill_id, reply: resume_calls.append((bill_id, reply)),
     )
 
     body = json.dumps(_whatsapp_payload()).encode("utf-8")
@@ -159,7 +165,7 @@ def test_whatsapp_webhook_receive_records_valid_message(monkeypatch):
         headers={"x-hub-signature-256": signature, "content-type": "application/json"},
     )
     assert response.status_code == 200
-    assert response.json() == {"received": 1, "recorded": 1}
+    assert response.json() == {"received": 1, "recorded": 1, "resumed": 0}
     assert recorded == [
         {
             "message_id": "wamid.test1",
@@ -168,3 +174,65 @@ def test_whatsapp_webhook_receive_records_valid_message(monkeypatch):
             "timestamp": "1700000000",
         }
     ]
+    assert resume_calls == []
+
+
+def test_whatsapp_webhook_receive_resumes_a_matched_parked_run(monkeypatch):
+    # T45/PRD S7.6: a reply that matches a parked run continues that run's
+    # loop from the pharmacist's answer -- find_resumable_run's job is
+    # picking *which* run (resume_state.py); this route just wires the
+    # match to resume_bill with the reply's raw text.
+    monkeypatch.setattr("pharmacy_agent.app.webhook_app_secret", lambda: "test-secret")
+    monkeypatch.setattr("pharmacy_agent.app.record_inbound_message", lambda message: True)
+    monkeypatch.setattr(
+        "pharmacy_agent.app.find_resumable_run",
+        lambda: {"bill_id": "parked-bill-1"},
+    )
+    resume_calls = []
+    monkeypatch.setattr(
+        "pharmacy_agent.app.resume_bill",
+        lambda bill_id, reply: resume_calls.append((bill_id, reply)),
+    )
+
+    body = json.dumps(_whatsapp_payload(body="yes, that's expected, please record it")).encode("utf-8")
+    signature = "sha256=" + hmac.new(b"test-secret", body, hashlib.sha256).hexdigest()
+
+    client = TestClient(app)
+    response = client.post(
+        "/whatsapp/webhook",
+        content=body,
+        headers={"x-hub-signature-256": signature, "content-type": "application/json"},
+    )
+    assert response.status_code == 200
+    assert response.json() == {"received": 1, "recorded": 1, "resumed": 1}
+    assert resume_calls == [("parked-bill-1", "yes, that's expected, please record it")]
+
+
+def test_whatsapp_webhook_receive_does_not_resume_an_already_recorded_duplicate(monkeypatch):
+    # A Meta webhook retry of the same message must not fire resume_bill
+    # again -- record_inbound_message's own dedup (T42) is what protects
+    # against that here.
+    monkeypatch.setattr("pharmacy_agent.app.webhook_app_secret", lambda: "test-secret")
+    monkeypatch.setattr("pharmacy_agent.app.record_inbound_message", lambda message: False)
+    monkeypatch.setattr(
+        "pharmacy_agent.app.find_resumable_run",
+        lambda: {"bill_id": "parked-bill-1"},
+    )
+    resume_calls = []
+    monkeypatch.setattr(
+        "pharmacy_agent.app.resume_bill",
+        lambda bill_id, reply: resume_calls.append((bill_id, reply)),
+    )
+
+    body = json.dumps(_whatsapp_payload()).encode("utf-8")
+    signature = "sha256=" + hmac.new(b"test-secret", body, hashlib.sha256).hexdigest()
+
+    client = TestClient(app)
+    response = client.post(
+        "/whatsapp/webhook",
+        content=body,
+        headers={"x-hub-signature-256": signature, "content-type": "application/json"},
+    )
+    assert response.status_code == 200
+    assert response.json() == {"received": 1, "recorded": 0, "resumed": 0}
+    assert resume_calls == []

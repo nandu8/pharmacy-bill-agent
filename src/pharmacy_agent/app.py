@@ -20,6 +20,8 @@ from fastapi.responses import HTMLResponse, PlainTextResponse
 from google.auth.transport import requests as google_requests
 from google.oauth2 import id_token
 
+from .agent.loop import resume_bill
+from .agent.resume_state import find_resumable_run
 from .ingest import handle_pubsub_push
 from .status_page import list_bills, render_status_page
 from .telemetry import project_id as gcp_project_id
@@ -90,10 +92,20 @@ async def whatsapp_webhook_receive(request: Request) -> dict:
     payload = json.loads(raw_body)
     messages = extract_messages(payload)
     recorded = 0
+    resumed = 0
     for message in messages:
-        if await asyncio.to_thread(record_inbound_message, message):
-            recorded += 1
-    return {"received": len(messages), "recorded": recorded}
+        if not await asyncio.to_thread(record_inbound_message, message):
+            continue
+        recorded += 1
+        # PRD S7.6/T45: a new inbound reply may be the answer a parked run
+        # is waiting on -- find_resumable_run's "most recently parked,
+        # not-yet-resumed pending_pharmacist run" heuristic is this
+        # single-pharmacist deployment's correlation key (resume_state.py).
+        run = await asyncio.to_thread(find_resumable_run)
+        if run is not None:
+            await asyncio.to_thread(resume_bill, run["bill_id"], message["body"])
+            resumed += 1
+    return {"received": len(messages), "recorded": recorded, "resumed": resumed}
 
 
 @app.get("/health")

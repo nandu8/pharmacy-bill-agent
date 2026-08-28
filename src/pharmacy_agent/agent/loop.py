@@ -14,7 +14,15 @@ Terminal-state interpretation (T29) comes from the model calling `finish`
 as its last action; the run also stops -- and is parked, never left running
 forever -- if it exceeds `max_turns` without doing so (PRD S7.10 turn-cap
 guardrail, T30).
-"""
+
+`resume_bill` (PRD S7.6 / T45) is the other entry point: instead of raw
+file bytes, it rehydrates a parked run's serialized bill/findings
+(resume_state.py, T44) into a fresh session and kicks off with the
+pharmacist's reply instead of a new bill. `_drive_runner`/`_finalize_run`
+factor out the turn-driving and outcome-recording logic both entry points
+share, so a resumed run gets the same terminal-state handling, turn cap,
+trace, and Firestore writes a fresh one does -- just seeded differently and
+(if it parks again) with its tool-call history prefixed by the prior pause's."""
 from __future__ import annotations
 
 import asyncio
@@ -29,7 +37,12 @@ from opentelemetry import trace as otel_trace
 
 from . import tools as agent_tools
 from .model import build_agent
-from .resume_state import serialize_run_state
+from .resume_state import (
+    deserialize_bill,
+    get_agent_run,
+    mark_resumed,
+    serialize_run_state,
+)
 from .terminal import (
     FINISH_TOOL_NAME,
     PENDING_PHARMACIST,
@@ -96,6 +109,25 @@ cross_check_other_vendors), or status="pending_vendor" if the file could not
 be read by any available tool. Include a one-sentence summary of your
 conclusion."""
 
+_RESUME_KICKOFF_TEMPLATE = """This bill was previously parked, waiting on the
+pharmacist. Your earlier question was: "{open_question}"
+
+The pharmacist just replied over WhatsApp: "{reply}"
+
+The bill's parsed data (vendor, line items) and your prior findings are
+already loaded in your session state -- you do not need to re-parse or
+re-detect the format. Use the pharmacist's answer to decide how to proceed.
+
+If the answer resolves your question, record the purchase (if not already
+recorded) and call notify_pharmacist once with a short confirmation before
+finishing status="resolved". If it doesn't and you still need more input,
+call ask_pharmacist again with a new, more specific question before
+finishing status="pending_pharmacist" -- never park again without asking a
+concrete question.
+
+You must end by calling `finish` exactly once, as your last action, with a
+one-sentence summary of your conclusion."""
+
 _NO_TERMINAL_STATUS_FINDING = (
     "agent stopped without calling finish -- parked for pharmacist review"
 )
@@ -125,28 +157,16 @@ class AgentRunResult:
     trace_id: str | None
 
 
-async def _run_async(file_bytes: bytes, vendor_hint: str, max_turns: int) -> AgentRunResult:
-    setup_tracing()
-    tracer = otel_trace.get_tracer(__name__)
-    with tracer.start_as_current_span("process_bill"):
-        return await _run_traced(file_bytes, vendor_hint, max_turns)
+@dataclasses.dataclass
+class _DrivenRun:
+    tool_call_history: list[ToolCallRecord]
+    turn_count: int
+    final_text: str
+    terminal_status: str | None
+    turn_cap_exceeded: bool
 
 
-async def _run_traced(file_bytes: bytes, vendor_hint: str, max_turns: int) -> AgentRunResult:
-    # PRD S8: every bill's tool-call turns share this span's trace id (T54),
-    # so the trace recorded on the `bills` doc covers the whole run, not
-    # just whichever individual ADK-internal span happens to be current.
-    trace_id = current_trace_id()
-    agent = build_agent(tools=_TOOLS)
-    runner = InMemoryRunner(agent=agent, app_name=_APP_NAME)
-
-    session = await runner.session_service.create_session(
-        app_name=_APP_NAME,
-        user_id=_USER_ID,
-        state={"_file_bytes": file_bytes, "_vendor_hint": vendor_hint, "_findings": []},
-    )
-
-    message = types.Content(role="user", parts=[types.Part.from_text(text=_KICKOFF_MESSAGE)])
+async def _drive_runner(runner: InMemoryRunner, session, message, max_turns: int) -> _DrivenRun:
     tool_call_history: list[ToolCallRecord] = []
     turn_count = 0
     final_text = ""
@@ -183,20 +203,32 @@ async def _run_traced(file_bytes: bytes, vendor_hint: str, max_turns: int) -> Ag
                     turn_cap_exceeded = True
                 break
 
+    return _DrivenRun(tool_call_history, turn_count, final_text, terminal_status, turn_cap_exceeded)
+
+
+async def _finalize_run(
+    runner: InMemoryRunner,
+    session_id: str,
+    driven: _DrivenRun,
+    trace_id: str | None,
+    max_turns: int,
+    vendor_hint: str = "",
+    prior_tool_call_history: list[ToolCallRecord] | None = None,
+) -> AgentRunResult:
     session = await runner.session_service.get_session(
-        app_name=_APP_NAME, user_id=_USER_ID, session_id=session.id
+        app_name=_APP_NAME, user_id=_USER_ID, session_id=session_id
     )
     bill = session.state.get("_bill")
     issues = session.state.get("_validation_issues", [])
     findings = list(session.state.get("_findings", []))
-    status = session.state.get("_terminal_status") or terminal_status
+    status = session.state.get("_terminal_status") or driven.terminal_status
 
     if status is None:
         # PRD S7.10: no bill is ever silently dropped -- if the model
         # stopped without declaring a terminal state, park it rather than
         # report an undefined outcome.
         status = PENDING_PHARMACIST
-        if turn_cap_exceeded:
+        if driven.turn_cap_exceeded:
             finding = _turn_cap_finding(max_turns)
             _logger.warning(
                 "bill parked pending_pharmacist: %s (vendor=%s invoice_no=%s)",
@@ -210,18 +242,23 @@ async def _run_traced(file_bytes: bytes, vendor_hint: str, max_turns: int) -> Ag
 
     bill_doc_id = record_bill_result(bill, status, findings, trace_id=trace_id)
 
+    # T44/T45: the full history across every pause/resume cycle, not just
+    # this segment's turns -- a run resumed a second time still needs to see
+    # what happened before its first pause.
+    full_tool_call_history = list(prior_tool_call_history or []) + driven.tool_call_history
+
     if status in (PENDING_PHARMACIST, PENDING_VENDOR):
         # PRD S7.6/T44: park durably rather than leave the run's context
         # only in this process's memory -- a later inbound reply (T45/T46)
         # needs the full tool-call history and open question to resume from
         # precisely this turn, on a different container, possibly days later.
-        serialize_run_state(bill, status, findings, tool_call_history, bill_doc_id)
+        serialize_run_state(bill, status, findings, full_tool_call_history, bill_doc_id)
 
     return AgentRunResult(
         status=status,
-        final_text=final_text,
-        tool_call_history=tool_call_history,
-        turn_count=turn_count,
+        final_text=driven.final_text,
+        tool_call_history=full_tool_call_history,
+        turn_count=driven.turn_count,
         bill=bill,
         validation_issues=issues,
         findings=findings,
@@ -230,5 +267,88 @@ async def _run_traced(file_bytes: bytes, vendor_hint: str, max_turns: int) -> Ag
     )
 
 
+async def _run_async(file_bytes: bytes, vendor_hint: str, max_turns: int) -> AgentRunResult:
+    setup_tracing()
+    tracer = otel_trace.get_tracer(__name__)
+    with tracer.start_as_current_span("process_bill"):
+        return await _run_traced(file_bytes, vendor_hint, max_turns)
+
+
+async def _run_traced(file_bytes: bytes, vendor_hint: str, max_turns: int) -> AgentRunResult:
+    # PRD S8: every bill's tool-call turns share this span's trace id (T54),
+    # so the trace recorded on the `bills` doc covers the whole run, not
+    # just whichever individual ADK-internal span happens to be current.
+    trace_id = current_trace_id()
+    agent = build_agent(tools=_TOOLS)
+    runner = InMemoryRunner(agent=agent, app_name=_APP_NAME)
+
+    session = await runner.session_service.create_session(
+        app_name=_APP_NAME,
+        user_id=_USER_ID,
+        state={"_file_bytes": file_bytes, "_vendor_hint": vendor_hint, "_findings": []},
+    )
+
+    message = types.Content(role="user", parts=[types.Part.from_text(text=_KICKOFF_MESSAGE)])
+    driven = await _drive_runner(runner, session, message, max_turns)
+    return await _finalize_run(runner, session.id, driven, trace_id, max_turns, vendor_hint=vendor_hint)
+
+
 def run_bill(file_bytes: bytes, vendor_hint: str = "", max_turns: int = _DEFAULT_MAX_TURNS) -> AgentRunResult:
     return asyncio.run(_run_async(file_bytes, vendor_hint, max_turns))
+
+
+async def _resume_async(agent_run_id: str, reply_text: str, max_turns: int) -> AgentRunResult | None:
+    setup_tracing()
+    agent_run = get_agent_run(agent_run_id)
+    if agent_run is None:
+        return None
+    mark_resumed(agent_run_id)
+    tracer = otel_trace.get_tracer(__name__)
+    with tracer.start_as_current_span("process_bill"):
+        return await _run_resumed_traced(agent_run, reply_text, max_turns)
+
+
+async def _run_resumed_traced(agent_run: dict, reply_text: str, max_turns: int) -> AgentRunResult:
+    trace_id = current_trace_id()
+    agent = build_agent(tools=_TOOLS)
+    runner = InMemoryRunner(agent=agent, app_name=_APP_NAME)
+
+    serialized_state = agent_run["serialized_state"]
+    bill = deserialize_bill(serialized_state)
+    prior_findings = list(serialized_state.get("findings", []))
+    prior_tool_call_history = [
+        ToolCallRecord(tool=r["tool"], args=r["args"]) for r in agent_run.get("tool_call_history", [])
+    ]
+    vendor_hint = bill.vendor if bill is not None else ""
+
+    session = await runner.session_service.create_session(
+        app_name=_APP_NAME,
+        user_id=_USER_ID,
+        state={"_bill": bill, "_findings": prior_findings, "_vendor_hint": vendor_hint},
+    )
+
+    kickoff = _RESUME_KICKOFF_TEMPLATE.format(
+        open_question=agent_run.get("open_question") or "(no question recorded)",
+        reply=reply_text,
+    )
+    message = types.Content(role="user", parts=[types.Part.from_text(text=kickoff)])
+    driven = await _drive_runner(runner, session, message, max_turns)
+    return await _finalize_run(
+        runner,
+        session.id,
+        driven,
+        trace_id,
+        max_turns,
+        vendor_hint=vendor_hint,
+        prior_tool_call_history=prior_tool_call_history,
+    )
+
+
+def resume_bill(
+    agent_run_id: str, reply_text: str, max_turns: int = _DEFAULT_MAX_TURNS
+) -> AgentRunResult | None:
+    """Rehydrate a parked run (T44's agent_runs doc, matched by the inbound
+    webhook via resume_state.find_resumable_run) and continue the loop from
+    the pharmacist's reply, as PRD S7.6 describes. Returns None if the given
+    id no longer has a parked run (already resumed, or never existed)."""
+    return asyncio.run(_resume_async(agent_run_id, reply_text, max_turns))

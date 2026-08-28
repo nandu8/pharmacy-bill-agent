@@ -1,7 +1,7 @@
 from conftest import SAMPLES_DIR
 
 from pharmacy_agent.agent import tools as agent_tools
-from pharmacy_agent.agent.loop import run_bill
+from pharmacy_agent.agent.loop import resume_bill, run_bill
 from pharmacy_agent.agent.terminal import PENDING_PHARMACIST, RESOLVED
 from pharmacy_agent.firestore_client import (
     agent_runs_collection,
@@ -240,3 +240,62 @@ def test_run_bill_parks_on_turn_cap_exhaustion(monkeypatch):
         assert run_doc["tool_call_history"]
     finally:
         _cleanup(result.bill, result.bill_doc_id)
+
+
+def test_resume_bill_continues_a_parked_run_to_resolution(monkeypatch):
+    # T45/PRD S7.6 milestone (Demo Bill 4's mechanism): a bill parks on a
+    # confirmed-but-unresolved price deviation, then a WhatsApp reply
+    # resumes it -- on a fresh ADK session/runner, not the one that parked
+    # it -- and it resolves and actually records the purchase, same as
+    # T47's "days later, different container" scenario but without needing
+    # a real webhook round-trip to exercise the resume mechanics.
+    _stub_pharmacist_whatsapp(monkeypatch)
+    vendor = "AT Resume Vendor"
+    item_name = "AT RESUME ITEM"
+    client = get_client()
+    seed_doc_ids: list[str] = []
+    for i, (date_iso, rate) in enumerate(
+        [("2026-05-15", 20.00), ("2026-06-15", 20.50), ("2026-07-15", 21.00)], start=1
+    ):
+        seed_bill = _history_bill(vendor, f"AT-RESUME-HIST-{i}", date_iso, item_name, rate)
+        seed_doc_ids.extend(record_purchase(seed_bill, client=client))
+
+    deviation_data = _format_b_csv(
+        vendor, "AT-RESUME-CURRENT", "20/08/2026", item_name, qty=10, rate=27.00, mrp=35.00
+    )
+
+    parked_result = None
+    resumed_result = None
+    try:
+        parked_result = run_bill(deviation_data)
+        assert parked_result.status == PENDING_PHARMACIST
+
+        resumed_result = resume_bill(
+            parked_result.bill_doc_id,
+            "Yes, that rate is correct -- go ahead and record it.",
+        )
+
+        assert resumed_result is not None
+        assert resumed_result.status == RESOLVED
+        assert resumed_result.bill_doc_id == parked_result.bill_doc_id
+
+        # T44/T45: the resumed run's tool-call history spans the whole
+        # bill, not just the segment since resuming.
+        resumed_tools = [r.tool for r in resumed_result.tool_call_history]
+        assert "check_price_deviation" in resumed_tools
+        assert "record_purchase" in resumed_tools
+
+        run_doc = agent_runs_collection(client).document(parked_result.bill_doc_id).get().to_dict()
+        assert run_doc["resumed_at"] is not None
+
+        bill_doc = bills_collection(client).document(parked_result.bill_doc_id).get().to_dict()
+        assert bill_doc["status"] == RESOLVED
+    finally:
+        for doc_id in seed_doc_ids:
+            purchase_ledger_collection(client).document(doc_id).delete()
+        if parked_result is not None:
+            _cleanup(parked_result.bill, parked_result.bill_doc_id)
+
+
+def test_resume_bill_returns_none_for_an_unknown_agent_run_id():
+    assert resume_bill("no-such-agent-run", "any reply") is None
