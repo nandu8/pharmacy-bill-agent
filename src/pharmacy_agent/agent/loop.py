@@ -22,7 +22,12 @@ pharmacist's reply instead of a new bill. `_drive_runner`/`_finalize_run`
 factor out the turn-driving and outcome-recording logic both entry points
 share, so a resumed run gets the same terminal-state handling, turn cap,
 trace, and Firestore writes a fresh one does -- just seeded differently and
-(if it parks again) with its tool-call history prefixed by the prior pause's."""
+(if it parks again) with its tool-call history prefixed by the prior pause's.
+
+The resume kickoff prompt also asks the model to call
+record_pharmacist_resolution (T58/PRD S7.7) when a reply settles a price
+question, so check_price_deviation's memory of past approve/reject
+decisions applies to bills that arrive after this one, not just this one."""
 from __future__ import annotations
 
 import asyncio
@@ -73,6 +78,7 @@ _TOOLS = [
     agent_tools.record_purchase,
     agent_tools.notify_pharmacist,
     agent_tools.ask_pharmacist,
+    agent_tools.record_pharmacist_resolution,
     finish,
 ]
 
@@ -142,6 +148,13 @@ finishing status="resolved". If it doesn't and you still need more input,
 call ask_pharmacist again with a new, more specific question before
 finishing status="pending_pharmacist" -- never park again without asking a
 concrete question.
+
+If your earlier question was about a price deviation on a specific item and
+the pharmacist's reply clearly approves or rejects that rate, call
+record_pharmacist_resolution once for that item with decision="approved" or
+decision="rejected" before finishing -- this is how future bills from this
+vendor for this item remember the decision, so do this even though it isn't
+needed to resolve the bill in front of you right now.
 
 You must end by calling `finish` exactly once, as your last action, with a
 one-sentence summary of your conclusion."""

@@ -344,3 +344,36 @@ def test_ask_pharmacist_impl_delegates_with_resolved_vendor_and_reference(monkey
 
     assert result == {"sent": True, "mode": "ask"}
     assert captured["args"] == ("AT WA Hint Vendor", "unparsed", "Is this deviation expected?")
+
+
+def test_record_pharmacist_resolution_impl_writes_and_returns_doc_id():
+    from pharmacy_agent.firestore_client import pharmacist_resolutions_collection
+
+    client = get_client()
+    bill = _make_bill("AT Resolution Vendor", "AT-RES-001", item_name="AT RES ITEM", rate=27.0)
+    state = {"_bill": bill}
+    result = agent_tools._record_pharmacist_resolution_impl(state, "AT RES ITEM", "approved", "confirmed by pharmacist")
+    try:
+        assert result["recorded"] is True
+        doc = pharmacist_resolutions_collection(client).document(result["doc_id"]).get()
+        assert doc.exists
+        data = doc.to_dict()
+        assert data["vendor"] == "AT Resolution Vendor"
+        assert data["decision"] == "approved"
+        assert data["rate"] == 27.0
+        assert data["note"] == "confirmed by pharmacist"
+        assert data["invoice_no"] == "AT-RES-001"
+    finally:
+        pharmacist_resolutions_collection(client).document(result["doc_id"]).delete()
+
+
+def test_record_pharmacist_resolution_impl_without_parsed_bill_returns_error():
+    result = agent_tools._record_pharmacist_resolution_impl({}, "ANYTHING", "approved")
+    assert result == {"error": "no bill parsed yet -- call a parse tool first"}
+
+
+def test_record_pharmacist_resolution_impl_unknown_item_returns_error():
+    bill = _make_bill("AT Resolution Vendor", "AT-RES-002", item_name="AT RES ITEM", rate=27.0)
+    state = {"_bill": bill}
+    result = agent_tools._record_pharmacist_resolution_impl(state, "NO SUCH ITEM", "approved")
+    assert result == {"error": "no line item named 'NO SUCH ITEM' on this bill"}

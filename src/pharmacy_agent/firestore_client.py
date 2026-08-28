@@ -17,6 +17,7 @@ BILLS_COLLECTION = "bills"
 PURCHASE_LEDGER_COLLECTION = "purchase_ledger"
 AGENT_RUNS_COLLECTION = "agent_runs"
 WHATSAPP_INBOUND_COLLECTION = "whatsapp_inbound_log"
+PHARMACIST_RESOLUTIONS_COLLECTION = "pharmacist_resolutions"
 
 _PROJECT = os.environ.get("GOOGLE_CLOUD_PROJECT", "pharmacy-bill-agent")
 _DATABASE = os.environ.get("FIRESTORE_DATABASE", "(default)")
@@ -48,3 +49,7 @@ def agent_runs_collection(client: firestore.Client | None = None) -> firestore.C
 
 def whatsapp_inbound_collection(client: firestore.Client | None = None) -> firestore.CollectionReference:
     return (client or get_client()).collection(WHATSAPP_INBOUND_COLLECTION)
+
+
+def pharmacist_resolutions_collection(client: firestore.Client | None = None) -> firestore.CollectionReference:
+    return (client or get_client()).collection(PHARMACIST_RESOLUTIONS_COLLECTION)

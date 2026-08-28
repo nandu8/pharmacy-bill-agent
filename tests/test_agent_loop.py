@@ -12,9 +12,11 @@ from pharmacy_agent.firestore_client import (
     agent_runs_collection,
     bills_collection,
     get_client,
+    pharmacist_resolutions_collection,
     purchase_ledger_collection,
 )
 from pharmacy_agent.formats.schema import Bill, LineItem
+from pharmacy_agent.pharmacist_resolutions import resolution_doc_id
 from pharmacy_agent.purchase_ledger import ledger_doc_id, normalize_item_key, record_purchase
 from pharmacy_agent.vendor_directory import (
     set_pharmacist_email,
@@ -448,3 +450,66 @@ def test_resume_bill_with_file_reparses_a_vendor_resend_to_resolution(monkeypatc
             _cleanup(resumed_result.bill, resumed_result.bill_doc_id)
         elif parked_result is not None:
             _cleanup(parked_result.bill, parked_result.bill_doc_id)
+
+
+def test_resume_bill_records_pharmacist_approval_and_a_later_bill_stops_being_flagged(monkeypatch):
+    # T58/PRD S7.7 milestone: once the pharmacist approves a price rise for
+    # a vendor+item, the agent stops flagging it -- confirmed here across
+    # two separate runs (the resume that captures the approval, then a
+    # brand-new bill at the same rate that must resolve without asking
+    # again), not just within one run's session state.
+    _stub_pharmacist_whatsapp(monkeypatch)
+    vendor = "AT Memory Vendor"
+    item_name = "AT MEMORY ITEM"
+    client = get_client()
+    seed_doc_ids: list[str] = []
+    for i, (date_iso, rate) in enumerate(
+        [("2026-05-15", 20.00), ("2026-06-15", 20.50), ("2026-07-15", 21.00)], start=1
+    ):
+        seed_bill = _history_bill(vendor, f"AT-MEM-HIST-{i}", date_iso, item_name, rate)
+        seed_doc_ids.extend(record_purchase(seed_bill, client=client))
+
+    deviation_data = _format_b_csv(
+        vendor, "AT-MEM-CURRENT", "20/08/2026", item_name, qty=10, rate=27.00, mrp=35.00
+    )
+    resolution_id = resolution_doc_id(vendor, item_name)
+
+    parked_result = None
+    resumed_result = None
+    later_result = None
+    try:
+        parked_result = run_bill(deviation_data)
+        assert parked_result.status == PENDING_PHARMACIST
+
+        resumed_result = resume_bill(
+            parked_result.bill_doc_id,
+            "Yes, that rate is correct and approved -- go ahead and record it, "
+            "and you don't need to flag this again.",
+        )
+        assert resumed_result is not None
+        assert resumed_result.status == RESOLVED
+        resumed_tools = [r.tool for r in resumed_result.tool_call_history]
+        assert "record_pharmacist_resolution" in resumed_tools
+
+        resolution_doc = pharmacist_resolutions_collection(client).document(resolution_id).get()
+        assert resolution_doc.exists
+        assert resolution_doc.to_dict()["decision"] == "approved"
+
+        # A brand-new bill, same vendor+item+rate: check_price_deviation now
+        # reports within_normal because of the standing approval, so the
+        # model resolves without asking the pharmacist a second time.
+        repeat_data = _format_b_csv(
+            vendor, "AT-MEM-REPEAT", "25/08/2026", item_name, qty=10, rate=27.00, mrp=35.00
+        )
+        later_result = run_bill(repeat_data)
+        assert later_result.status == RESOLVED
+        later_tools = [r.tool for r in later_result.tool_call_history]
+        assert "ask_pharmacist" not in later_tools
+    finally:
+        for doc_id in seed_doc_ids:
+            purchase_ledger_collection(client).document(doc_id).delete()
+        pharmacist_resolutions_collection(client).document(resolution_id).delete()
+        if parked_result is not None:
+            _cleanup(parked_result.bill, parked_result.bill_doc_id)
+        if later_result is not None:
+            _cleanup(later_result.bill, later_result.bill_doc_id)

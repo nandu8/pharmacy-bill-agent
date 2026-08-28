@@ -7,10 +7,13 @@ checks, plus the T41 WhatsApp tools (notify_pharmacist, ask_pharmacist), plus
 the T43 dispute tool (send_dispute_email, wrapping T39's dispute_gate and
 T38's email_vendor dispute mode -- gating enforced in code, not left to
 prompting, same guardrail-in-code approach as the recipient-directory rule
-below). The remaining PRD S7.2 tools -- find_related_document, stage_file,
-email_vendor's resend mode -- depend on infrastructure not yet wired into the
-loop (reconciliation, the unreadable-file recovery ladder) and aren't wired
-here.
+below), plus the T58 memory tool (record_pharmacist_resolution, wrapping
+pharmacist_resolutions.py -- writes a resumed run's price approve/reject
+decision back to Firestore so check_price_deviation's PRD S7.7 memory
+applies on future bills). The remaining PRD S7.2 tools -- find_related_document,
+stage_file, email_vendor's resend mode -- depend on infrastructure not yet
+wired into the loop (reconciliation, the unreadable-file recovery ladder) and
+aren't wired here.
 
 Each tool reads/writes the run's session state (`tool_context.state`)
 instead of taking the file bytes or the parsed Bill as an LLM-visible
@@ -40,6 +43,7 @@ from .. import dispute_gate as dispute_gate_mod
 from .. import email_vendor as email_vendor_mod
 from .. import lookup_vendor_history as lookup_vendor_history_mod
 from .. import normalize
+from .. import pharmacist_resolutions as pharmacist_resolutions_mod
 from .. import pharmacist_whatsapp as pharmacist_whatsapp_mod
 from .. import purchase_ledger
 from .. import validate
@@ -211,6 +215,7 @@ def _check_price_deviation_impl(state, item_name: str, current_rate: float) -> d
         "pct_change": result.pct_change,
         "prior_invoice_count": result.prior_invoice_count,
         "confirmed": result.confirmed,
+        "prior_pharmacist_decision": result.resolution.decision.value if result.resolution else None,
     }
 
 
@@ -219,9 +224,13 @@ def check_price_deviation(item_name: str, current_rate: float, tool_context: Too
     invoices for the same item. signal is "no_history" (nothing to compare
     against), "within_normal", or "deviation_detected" (10%+ move vs. the
     most recent prior invoice). confirmed=true means the deviation is backed
-    by 3+ prior invoices, not a thin one-off. Only worth calling for a line
-    item you have a specific reason to double-check -- not every line on
-    every bill."""
+    by 3+ prior invoices, not a thin one-off. prior_pharmacist_decision is
+    "approved"/"rejected" if a past resolution for this vendor+item already
+    exists (already factored into signal -- an approved rate at or above
+    this one is never flagged, a rejected pattern is flagged more
+    sensitively) or null if none exists. Only worth calling for a line item
+    you have a specific reason to double-check -- not every line on every
+    bill."""
     return _check_price_deviation_impl(tool_context.state, item_name, current_rate)
 
 
@@ -343,3 +352,43 @@ def ask_pharmacist(question: str, tool_context: ToolContext) -> dict:
     finish(status="pending_pharmacist", ...) -- never park a bill without
     asking a concrete question first."""
     return _ask_pharmacist_impl(tool_context.state, question)
+
+
+def _record_pharmacist_resolution_impl(state, item_name: str, decision: str, note: str = "") -> dict:
+    bill = state.get("_bill")
+    if bill is None:
+        return {"error": "no bill parsed yet -- call a parse tool first"}
+
+    line = next(
+        (
+            li
+            for li in bill.line_items
+            if purchase_ledger.normalize_item_key(li.item_name) == purchase_ledger.normalize_item_key(item_name)
+        ),
+        None,
+    )
+    if line is None:
+        return {"error": f"no line item named {item_name!r} on this bill"}
+
+    doc_id = pharmacist_resolutions_mod.record_pharmacist_resolution(
+        bill.vendor,
+        item_name,
+        rate=line.rate,
+        decision=pharmacist_resolutions_mod.PharmacistDecision(decision),
+        note=note,
+        invoice_no=bill.invoice_no,
+    )
+    return {"recorded": True, "doc_id": doc_id}
+
+
+def record_pharmacist_resolution(
+    item_name: str, decision: str, tool_context: ToolContext, note: str = ""
+) -> dict:
+    """Record the pharmacist's decision on a price question for one line
+    item -- decision is "approved" (the rate is fine, stop flagging it for
+    this vendor+item going forward) or "rejected" (the rate is not fine;
+    future deviations for this vendor+item get flagged more sensitively).
+    Only call this while resuming a run parked on a price-related
+    ask_pharmacist question, once the reply makes the pharmacist's decision
+    clear -- not for questions unrelated to pricing."""
+    return _record_pharmacist_resolution_impl(tool_context.state, item_name, decision, note)
