@@ -29,7 +29,14 @@ from opentelemetry import trace as otel_trace
 
 from . import tools as agent_tools
 from .model import build_agent
-from .terminal import FINISH_TOOL_NAME, PENDING_PHARMACIST, finish, record_bill_result
+from .resume_state import serialize_run_state
+from .terminal import (
+    FINISH_TOOL_NAME,
+    PENDING_PHARMACIST,
+    PENDING_VENDOR,
+    finish,
+    record_bill_result,
+)
 from ..formats.schema import Bill
 from ..telemetry import current_trace_id, setup_tracing
 from ..validate import ValidationIssue
@@ -202,6 +209,13 @@ async def _run_traced(file_bytes: bytes, vendor_hint: str, max_turns: int) -> Ag
         findings.append(finding)
 
     bill_doc_id = record_bill_result(bill, status, findings, trace_id=trace_id)
+
+    if status in (PENDING_PHARMACIST, PENDING_VENDOR):
+        # PRD S7.6/T44: park durably rather than leave the run's context
+        # only in this process's memory -- a later inbound reply (T45/T46)
+        # needs the full tool-call history and open question to resume from
+        # precisely this turn, on a different container, possibly days later.
+        serialize_run_state(bill, status, findings, tool_call_history, bill_doc_id)
 
     return AgentRunResult(
         status=status,

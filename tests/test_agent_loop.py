@@ -3,7 +3,12 @@ from conftest import SAMPLES_DIR
 from pharmacy_agent.agent import tools as agent_tools
 from pharmacy_agent.agent.loop import run_bill
 from pharmacy_agent.agent.terminal import PENDING_PHARMACIST, RESOLVED
-from pharmacy_agent.firestore_client import bills_collection, get_client, purchase_ledger_collection
+from pharmacy_agent.firestore_client import (
+    agent_runs_collection,
+    bills_collection,
+    get_client,
+    purchase_ledger_collection,
+)
 from pharmacy_agent.formats.schema import Bill, LineItem
 from pharmacy_agent.purchase_ledger import ledger_doc_id, normalize_item_key, record_purchase
 
@@ -29,6 +34,10 @@ def _stub_pharmacist_whatsapp(monkeypatch):
 def _cleanup(bill, bill_doc_id):
     client = get_client()
     bills_collection(client).document(bill_doc_id).delete()
+    # T44: pending_pharmacist/pending_vendor runs also write an agent_runs
+    # doc under this same id -- harmless no-op delete when a run resolved
+    # and never wrote one.
+    agent_runs_collection(client).document(bill_doc_id).delete()
     if bill is None:
         return
     for item in bill.line_items:
@@ -189,6 +198,17 @@ def test_run_bill_takes_a_longer_investigation_chain_on_a_confirmed_price_deviat
         assert clean_result.trace_id is not None
         assert deviation_result.trace_id is not None
         assert clean_result.trace_id != deviation_result.trace_id
+
+        # T44: the parked run's context is durably serialized, keyed on the
+        # same doc id as its `bills` record, with the actual question the
+        # model asked over WhatsApp -- not just the terminal status.
+        assert bills_collection(client).document(clean_result.bill_doc_id).get().exists
+        assert not agent_runs_collection(client).document(clean_result.bill_doc_id).get().exists
+        run_doc = agent_runs_collection(client).document(deviation_result.bill_doc_id).get().to_dict()
+        assert run_doc["correlation_key"] == deviation_result.bill_doc_id
+        assert run_doc["serialized_state"]["vendor"] == vendor
+        assert run_doc["open_question"]
+        assert "ask_pharmacist" in [c["tool"] for c in run_doc["tool_call_history"]]
     finally:
         for doc_id in seed_doc_ids:
             purchase_ledger_collection(client).document(doc_id).delete()
@@ -212,5 +232,11 @@ def test_run_bill_parks_on_turn_cap_exhaustion(monkeypatch):
         assert result.turn_count == 1
         assert result.status == PENDING_PHARMACIST
         assert any("turn cap" in finding for finding in result.findings)
+
+        # T44: parked even though the model never got to call ask_pharmacist
+        # -- open_question is None, not a missing/failed serialize.
+        run_doc = agent_runs_collection(get_client()).document(result.bill_doc_id).get().to_dict()
+        assert run_doc["open_question"] is None
+        assert run_doc["tool_call_history"]
     finally:
         _cleanup(result.bill, result.bill_doc_id)
