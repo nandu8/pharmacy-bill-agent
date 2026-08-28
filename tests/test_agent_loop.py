@@ -399,6 +399,11 @@ def test_resume_bill_continues_a_parked_run_to_resolution(monkeypatch):
     finally:
         for doc_id in seed_doc_ids:
             purchase_ledger_collection(client).document(doc_id).delete()
+        # T58: an approval-sounding reply like this one's may lead the model
+        # to also call record_pharmacist_resolution -- clean it up so a
+        # stale approval doesn't downgrade this vendor+item's deviation to
+        # within_normal on the next run of this test.
+        pharmacist_resolutions_collection(client).document(resolution_doc_id(vendor, item_name)).delete()
         if parked_result is not None:
             _cleanup(parked_result.bill, parked_result.bill_doc_id)
 

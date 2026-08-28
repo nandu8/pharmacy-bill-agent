@@ -20,6 +20,16 @@ Two independent entry points:
   seeded=True. PRD S10: "any synthesized history beyond what the samples
   contain is labelled as seeded ... rather than presented as observed."
 
+- seed_cross_vendor_stability (T59): the piece seed_synthetic_price_history's
+  own docstring flagged as missing -- a *second* vendor's own stable
+  (non-moving) price history for the same item, so Demo Bill 2's live
+  cross_check_other_vendors call (T33) gets the conclusive "no_movement"
+  signal PRD S7.5 condition 2 requires, instead of "insufficient_data" (no
+  other vendor to compare against). Dated relative to today (not fixed
+  calendar dates) so the 60-day cross-vendor window stays satisfied
+  whenever the demo is actually recorded, not just on the day this was
+  written.
+
 Safe to re-run: record_purchase's doc IDs are deterministic hashes of
 vendor+invoice_no+item_name+batch_no, so running this script twice
 overwrites the same docs rather than duplicating them.
@@ -27,7 +37,7 @@ overwrites the same docs rather than duplicating them.
 from __future__ import annotations
 
 import sys
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -151,12 +161,74 @@ def seed_synthetic_price_history(client: firestore.Client | None = None) -> int:
     return doc_count
 
 
+# A second, distinct vendor stocking the same item at a stable rate -- the
+# "other vendor didn't move" half of the Demo Bill 2 dispute scenario.
+# Days-ago rather than fixed dates: both points must fall inside
+# cross_check_other_vendors' 60-day window measured from whatever date the
+# live demo bill actually arrives on.
+OTHER_VENDOR = "Crescent Pharma Distributors"
+OTHER_VENDOR_BATCH = "AMLO-STABLE"
+
+OTHER_VENDOR_HISTORY = [
+    ("SYN-STABLE-001", 40, 21.00),
+    ("SYN-STABLE-002", 10, 21.10),
+]
+
+
+def _other_vendor_bill(invoice_no: str, purchase_date: date, rate: float) -> Bill:
+    taxable_value = round(rate, 2)
+    tax1 = round(taxable_value * 0.06, 2)
+    tax2 = round(taxable_value * 0.06, 2)
+    item = LineItem(
+        vendor=OTHER_VENDOR,
+        invoice_no=invoice_no,
+        invoice_date=purchase_date.isoformat(),
+        item_name=_SYNTHETIC_ITEM,
+        batch_no=OTHER_VENDOR_BATCH,
+        expiry_date=_SYNTHETIC_EXPIRY,
+        quantity=1.0,
+        rate=rate,
+        discount=0.0,
+        taxable_value=taxable_value,
+        tax_component_1_label="CGST",
+        tax_component_1_rate=6.0,
+        tax_component_1_amount=tax1,
+        tax_component_2_label="SGST",
+        tax_component_2_rate=6.0,
+        tax_component_2_amount=tax2,
+        mrp=_SYNTHETIC_MRP,
+        line_total=round(taxable_value + tax1 + tax2, 2),
+        hsn_code=_SYNTHETIC_HSN,
+        source_format="synthetic",
+    )
+    return Bill(
+        vendor=OTHER_VENDOR,
+        invoice_no=invoice_no,
+        invoice_date=purchase_date.isoformat(),
+        source_format="synthetic",
+        line_items=[item],
+        total_amount=item.line_total,
+    )
+
+
+def seed_cross_vendor_stability(client: firestore.Client | None = None) -> int:
+    client = client or get_client()
+    today = date.today()
+    doc_count = 0
+    for invoice_no, days_ago, rate in OTHER_VENDOR_HISTORY:
+        bill = _other_vendor_bill(invoice_no, today - timedelta(days=days_ago), rate)
+        doc_count += len(record_purchase(bill, client=client, seeded=True))
+    return doc_count
+
+
 def main() -> None:
     client = get_client()
     real_count = seed_real_samples(client=client)
     print(f"seeded {real_count} real purchase_ledger docs (seeded=False)")
     synthetic_count = seed_synthetic_price_history(client=client)
     print(f"seeded {synthetic_count} synthetic purchase_ledger docs (seeded=True)")
+    stability_count = seed_cross_vendor_stability(client=client)
+    print(f"seeded {stability_count} cross-vendor stability docs (seeded=True)")
 
 
 if __name__ == "__main__":
