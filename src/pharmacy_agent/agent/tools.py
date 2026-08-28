@@ -3,10 +3,14 @@ Phase 3/4 (detect_format, parse_csv, parse_xls, parse_pdf_vision,
 lookup_vendor_history, check_duplicate, record_purchase) as ADK function
 tools, plus the Phase 6 investigation tools (check_price_deviation,
 cross_check_other_vendors -- T55) once a bill needs more than structural
-checks, plus the T41 WhatsApp tools (notify_pharmacist, ask_pharmacist). The
-remaining PRD S7.2 tools -- find_related_document, stage_file, email_vendor
--- depend on infrastructure not yet wired into the loop (dispute gating,
-reconciliation) and aren't wired here.
+checks, plus the T41 WhatsApp tools (notify_pharmacist, ask_pharmacist), plus
+the T43 dispute tool (send_dispute_email, wrapping T39's dispute_gate and
+T38's email_vendor dispute mode -- gating enforced in code, not left to
+prompting, same guardrail-in-code approach as the recipient-directory rule
+below). The remaining PRD S7.2 tools -- find_related_document, stage_file,
+email_vendor's resend mode -- depend on infrastructure not yet wired into the
+loop (reconciliation, the unreadable-file recovery ladder) and aren't wired
+here.
 
 Each tool reads/writes the run's session state (`tool_context.state`)
 instead of taking the file bytes or the parsed Bill as an LLM-visible
@@ -32,6 +36,8 @@ from google.adk.tools.tool_context import ToolContext
 from .. import check_duplicate as check_duplicate_mod
 from .. import check_price_deviation as check_price_deviation_mod
 from .. import cross_check_other_vendors as cross_check_other_vendors_mod
+from .. import dispute_gate as dispute_gate_mod
+from .. import email_vendor as email_vendor_mod
 from .. import lookup_vendor_history as lookup_vendor_history_mod
 from .. import normalize
 from .. import pharmacist_whatsapp as pharmacist_whatsapp_mod
@@ -192,6 +198,12 @@ def _check_price_deviation_impl(state, item_name: str, current_rate: float) -> d
     if bill is None:
         return {"error": "no bill parsed yet -- call a parse tool first"}
     result = check_price_deviation_mod.check_price_deviation(bill.vendor, item_name, current_rate)
+    # Kept as the raw result object (not the dict returned to the model) so
+    # send_dispute_email can re-derive dispute_gate's PRD S7.5 conditions
+    # without asking the model to echo structured findings back as an
+    # argument -- same "state, not an LLM-visible argument" reasoning as the
+    # module docstring gives for _bill/_file_bytes.
+    state.setdefault("_price_deviation_results", {})[item_name] = result
     return {
         "signal": result.signal.value,
         "current_rate": result.current_rate,
@@ -220,6 +232,7 @@ def _cross_check_other_vendors_impl(state, item_name: str) -> dict:
     result = cross_check_other_vendors_mod.cross_check_other_vendors(
         bill.vendor, item_name, bill.invoice_date
     )
+    state.setdefault("_cross_vendor_check_results", {})[item_name] = result
     return {
         "signal": result.signal.value,
         "vendor_movements": [dataclasses.asdict(m) for m in result.vendor_movements],
@@ -236,6 +249,67 @@ def cross_check_other_vendors(item_name: str, tool_context: ToolContext) -> dict
     signal="insufficient_data" means there isn't enough other-vendor history
     for this item to tell either way."""
     return _cross_check_other_vendors_impl(tool_context.state, item_name)
+
+
+def _send_dispute_email_impl(state, item_name: str, subject: str, body: str) -> dict:
+    bill = state.get("_bill")
+    if bill is None:
+        return {"error": "no bill parsed yet -- call a parse tool first"}
+
+    price_deviation = state.get("_price_deviation_results", {}).get(item_name)
+    cross_vendor_check = state.get("_cross_vendor_check_results", {}).get(item_name)
+    if price_deviation is None or cross_vendor_check is None:
+        return {
+            "sent": False,
+            "reason": "must call check_price_deviation and cross_check_other_vendors "
+            "for this item first",
+        }
+
+    line = next(
+        (
+            li
+            for li in bill.line_items
+            if purchase_ledger.normalize_item_key(li.item_name) == purchase_ledger.normalize_item_key(item_name)
+        ),
+        None,
+    )
+    if line is None:
+        return {"sent": False, "reason": f"no line item named {item_name!r} on this bill"}
+
+    reference_rate = price_deviation.reference_rate
+    disputed_amount = (line.rate - reference_rate) * line.quantity if reference_rate is not None else 0.0
+
+    gate_result = dispute_gate_mod.check_dispute_gate(
+        bill.vendor, bill.invoice_no, price_deviation, cross_vendor_check, disputed_amount
+    )
+    if not gate_result.authorized:
+        return {
+            "sent": False,
+            "reason": "dispute_gate_denied",
+            "failed_conditions": gate_result.failed_conditions,
+        }
+
+    result = email_vendor_mod.email_vendor(bill.vendor, bill.invoice_no, "dispute", subject, body)
+    result["disputed_amount"] = disputed_amount
+    return result
+
+
+def send_dispute_email(item_name: str, subject: str, body: str, tool_context: ToolContext) -> dict:
+    """Send a factual, non-accusatory dispute email to the vendor for a
+    confirmed pricing error on one item -- cites the invoice number, the
+    vendor's own prior rate, and the current rate, and requests
+    clarification rather than demanding a credit note. Always CCs the
+    pharmacist. Only call this after check_price_deviation reported
+    confirmed=true and cross_check_other_vendors reported signal="no_movement"
+    for this exact item_name -- PRD S7.5's four dispute conditions (confirmed
+    deviation, conclusive no-market-movement, disputed amount above the value
+    floor, not already sent for this invoice) are re-checked and enforced
+    here in code, not left to your judgment alone. If the conditions aren't
+    met, or a dispute for this invoice was already sent, this returns
+    sent=false with a reason (and failed_conditions, if the gate denied it)
+    instead of sending anything -- fall back to ask_pharmacist with that
+    reason in that case."""
+    return _send_dispute_email_impl(tool_context.state, item_name, subject, body)
 
 
 def _resolve_vendor_reference(state) -> tuple[str, str]:

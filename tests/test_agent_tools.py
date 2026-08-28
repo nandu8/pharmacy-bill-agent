@@ -62,11 +62,11 @@ def test_parse_pdf_vision_impl_matches_hand_verified_line():
     assert first["line_total"] == 155.99
 
 
-def _make_bill(vendor, invoice_no, item_name="AT TOOL ITEM", rate=10.0):
+def _make_bill(vendor, invoice_no, item_name="AT TOOL ITEM", rate=10.0, invoice_date="2026-08-01"):
     item = LineItem(
         vendor=vendor,
         invoice_no=invoice_no,
-        invoice_date="2026-08-01",
+        invoice_date=invoice_date,
         item_name=item_name,
         batch_no="B1",
         expiry_date="2027-01-01",
@@ -88,7 +88,7 @@ def _make_bill(vendor, invoice_no, item_name="AT TOOL ITEM", rate=10.0):
     return Bill(
         vendor=vendor,
         invoice_no=invoice_no,
-        invoice_date="2026-08-01",
+        invoice_date=invoice_date,
         source_format="format_a",
         line_items=[item],
         total_amount=item.line_total,
@@ -206,6 +206,128 @@ def test_notify_pharmacist_impl_delegates_with_resolved_vendor_and_reference(mon
 
     assert result == {"sent": True, "mode": "notify"}
     assert captured["args"] == ("AT WA Vendor", "AT-WA-002", "Bill processed cleanly.")
+
+
+def test_check_price_deviation_impl_stores_result_object_in_state():
+    client = get_client()
+    doc_ids: list[str] = []
+    for i, (invoice_date, rate) in enumerate(
+        [("2026-05-15", 20.0), ("2026-06-15", 20.5), ("2026-07-15", 21.0)], start=1
+    ):
+        seed_bill = _make_bill(
+            "AT Deviation Vendor 2", f"AT-DEV2-HIST-{i}", item_name="AT DEV ITEM 2", rate=rate,
+            invoice_date=invoice_date,
+        )
+        doc_ids.extend(agent_tools.purchase_ledger.record_purchase(seed_bill, client=client))
+    try:
+        state = {"_bill": _make_bill("AT Deviation Vendor 2", "AT-DEV2-CURRENT", item_name="AT DEV ITEM 2", rate=27.0)}
+        agent_tools._check_price_deviation_impl(state, "AT DEV ITEM 2", 27.0)
+        stored = state["_price_deviation_results"]["AT DEV ITEM 2"]
+        assert stored.signal.value == "deviation_detected"
+        assert stored.confirmed is True
+        assert stored.reference_rate == 21.0
+    finally:
+        for doc_id in doc_ids:
+            purchase_ledger_collection(client).document(doc_id).delete()
+
+
+def test_cross_check_other_vendors_impl_stores_result_object_in_state():
+    state = {"_bill": _make_bill("AT Cross Vendor 2", "AT-CROSS2-001", item_name="AT CROSS ITEM 2", rate=10.0)}
+    agent_tools._cross_check_other_vendors_impl(state, "AT CROSS ITEM 2")
+    stored = state["_cross_vendor_check_results"]["AT CROSS ITEM 2"]
+    assert stored.signal.value == "insufficient_data"
+
+
+def test_send_dispute_email_impl_without_parsed_bill_returns_error():
+    result = agent_tools._send_dispute_email_impl({}, "ANYTHING", "subj", "body")
+    assert result == {"error": "no bill parsed yet -- call a parse tool first"}
+
+
+def test_send_dispute_email_impl_requires_prior_investigation_for_same_item():
+    state = {"_bill": _make_bill("AT Dispute Vendor", "AT-DISP-001", item_name="AT DISP ITEM", rate=27.0)}
+    result = agent_tools._send_dispute_email_impl(state, "AT DISP ITEM", "subj", "body")
+    assert result == {
+        "sent": False,
+        "reason": "must call check_price_deviation and cross_check_other_vendors for this item first",
+    }
+
+
+def test_send_dispute_email_impl_denied_by_gate_does_not_send(monkeypatch):
+    from pharmacy_agent.check_price_deviation import PriceDeviationResult, PriceDeviationSignal
+    from pharmacy_agent.cross_check_other_vendors import CrossVendorCheckResult, CrossVendorSignal
+
+    called = {"email_vendor": False}
+    monkeypatch.setattr(
+        agent_tools.email_vendor_mod,
+        "email_vendor",
+        lambda *a, **k: called.__setitem__("email_vendor", True) or {"sent": True},
+    )
+    state = {
+        "_bill": _make_bill("AT Dispute Vendor 2", "AT-DISP-002", item_name="AT DISP ITEM 2", rate=27.0),
+        "_price_deviation_results": {
+            "AT DISP ITEM 2": PriceDeviationResult(
+                signal=PriceDeviationSignal.DEVIATION_DETECTED,
+                current_rate=27.0,
+                reference_rate=21.0,
+                pct_change=0.2857,
+                prior_invoice_count=3,
+                confirmed=True,
+                history=[],
+            )
+        },
+        "_cross_vendor_check_results": {
+            "AT DISP ITEM 2": CrossVendorCheckResult(signal=CrossVendorSignal.MARKET_MOVEMENT, vendor_movements=[])
+        },
+    }
+
+    result = agent_tools._send_dispute_email_impl(state, "AT DISP ITEM 2", "subj", "body")
+
+    assert result["sent"] is False
+    assert result["reason"] == "dispute_gate_denied"
+    assert "cross_vendor_check_not_conclusive" in result["failed_conditions"]
+    assert called["email_vendor"] is False
+
+
+def test_send_dispute_email_impl_authorized_sends_and_reports_disputed_amount(monkeypatch):
+    from pharmacy_agent.check_price_deviation import PriceDeviationResult, PriceDeviationSignal
+    from pharmacy_agent.cross_check_other_vendors import CrossVendorCheckResult, CrossVendorSignal
+    from pharmacy_agent.dispute_gate import DisputeGateResult
+
+    captured = {}
+
+    def fake_email_vendor(vendor, reference, mode, subject, body):
+        captured["args"] = (vendor, reference, mode, subject, body)
+        return {"sent": True, "mode": mode, "log_id": "abc"}
+
+    monkeypatch.setattr(agent_tools.email_vendor_mod, "email_vendor", fake_email_vendor)
+    monkeypatch.setattr(
+        agent_tools.dispute_gate_mod,
+        "check_dispute_gate",
+        lambda *a, **k: DisputeGateResult(authorized=True, failed_conditions=[]),
+    )
+    state = {
+        "_bill": _make_bill("AT Dispute Vendor 3", "AT-DISP-003", item_name="AT DISP ITEM 3", rate=27.0),
+        "_price_deviation_results": {
+            "AT DISP ITEM 3": PriceDeviationResult(
+                signal=PriceDeviationSignal.DEVIATION_DETECTED,
+                current_rate=27.0,
+                reference_rate=21.0,
+                pct_change=0.2857,
+                prior_invoice_count=3,
+                confirmed=True,
+                history=[],
+            )
+        },
+        "_cross_vendor_check_results": {
+            "AT DISP ITEM 3": CrossVendorCheckResult(signal=CrossVendorSignal.NO_MOVEMENT, vendor_movements=[])
+        },
+    }
+
+    result = agent_tools._send_dispute_email_impl(state, "AT DISP ITEM 3", "subj", "body")
+
+    assert result["sent"] is True
+    assert result["disputed_amount"] == 6.0
+    assert captured["args"] == ("AT Dispute Vendor 3", "AT-DISP-003", "dispute", "subj", "body")
 
 
 def test_ask_pharmacist_impl_delegates_with_resolved_vendor_and_reference(monkeypatch):

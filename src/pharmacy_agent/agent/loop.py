@@ -69,6 +69,7 @@ _TOOLS = [
     agent_tools.check_duplicate,
     agent_tools.check_price_deviation,
     agent_tools.cross_check_other_vendors,
+    agent_tools.send_dispute_email,
     agent_tools.record_purchase,
     agent_tools.notify_pharmacist,
     agent_tools.ask_pharmacist,
@@ -92,23 +93,39 @@ to see whether other vendors moved on it too (a market-wide shift) or not (a
 vendor-specific anomaly). Never call check_price_deviation more than once
 for the same item.
 
+If cross_check_other_vendors reports signal="market_movement", the deviation
+is a market-wide shift, not this vendor's error -- record the purchase as
+usual, no dispute. If it reports signal="no_movement" -- a vendor-specific
+anomaly -- call send_dispute_email once for that item with a factual,
+non-accusatory subject/body citing the invoice number, the vendor's prior
+rate, and the current rate. If send_dispute_email returns sent=true, record
+the purchase (the bill is still real, write it as received), then call
+notify_pharmacist with a short note that a dispute was sent, and finish
+status="resolved". If it returns sent=false, call ask_pharmacist with the
+reason it gave (and failed_conditions, if present) instead, then finish
+status="pending_pharmacist" -- never retry send_dispute_email for the same
+item. If cross_check_other_vendors reports signal="insufficient_data", you
+cannot conclude either way -- call ask_pharmacist with your findings and
+finish status="pending_pharmacist".
+
 If the bill is clean (no validation issues, not a duplicate or reconciliation
 case, and no confirmed unexplained price deviation), record the purchase.
 
 Before concluding, tell the pharmacist what happened over WhatsApp: if you
 are about to finish with status="resolved", call notify_pharmacist once with
-a short confirmation of what was done. If you are about to finish with
+a short confirmation of what was done (including, if you sent one, that a
+dispute email went out). If you are about to finish with
 status="pending_pharmacist", call ask_pharmacist once with your specific
 open question instead -- never park a bill without asking a concrete
 question. status="pending_vendor" does not need either call.
 
 You must end the run by calling `finish` exactly once, as your last action:
-status="resolved" if the bill was verified and (when appropriate) recorded,
-status="pending_pharmacist" if you are genuinely unsure and a human should
-decide (including a confirmed price deviation you could not resolve via
-cross_check_other_vendors), or status="pending_vendor" if the file could not
-be read by any available tool. Include a one-sentence summary of your
-conclusion."""
+status="resolved" if the bill was verified and (when appropriate) recorded
+or disputed, status="pending_pharmacist" if you are genuinely unsure and a
+human should decide (including a confirmed price deviation you could not
+resolve via cross_check_other_vendors, or a dispute send_dispute_email
+declined to send), or status="pending_vendor" if the file could not be read
+by any available tool. Include a one-sentence summary of your conclusion."""
 
 _RESUME_KICKOFF_TEMPLATE = """This bill was previously parked, waiting on the
 pharmacist. Your earlier question was: "{open_question}"

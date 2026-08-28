@@ -1,8 +1,13 @@
+import os
+
+import pytest
+
 from conftest import SAMPLES_DIR
 
 from pharmacy_agent.agent import tools as agent_tools
 from pharmacy_agent.agent.loop import resume_bill, resume_bill_with_file, run_bill
 from pharmacy_agent.agent.terminal import PENDING_PHARMACIST, PENDING_VENDOR, RESOLVED
+from pharmacy_agent.email_vendor import email_log_doc_id
 from pharmacy_agent.firestore_client import (
     agent_runs_collection,
     bills_collection,
@@ -11,6 +16,18 @@ from pharmacy_agent.firestore_client import (
 )
 from pharmacy_agent.formats.schema import Bill, LineItem
 from pharmacy_agent.purchase_ledger import ledger_doc_id, normalize_item_key, record_purchase
+from pharmacy_agent.vendor_directory import (
+    set_pharmacist_email,
+    set_vendor_email,
+    vendor_directory_collection,
+    vendor_directory_doc_id,
+)
+
+# The account's own address (same one authorized via OAuth, T08/T09) -- kept
+# out of source since it's the developer's personal email; set it locally to
+# run the live dispute-send test below. Same convention as
+# test_email_vendor.py.
+TEST_ADDRESS = os.environ.get("TEST_GMAIL_ADDRESS")
 
 
 def _stub_pharmacist_whatsapp(monkeypatch):
@@ -216,6 +233,93 @@ def test_run_bill_takes_a_longer_investigation_chain_on_a_confirmed_price_deviat
             _cleanup(clean_result.bill, clean_result.bill_doc_id)
         if deviation_result is not None:
             _cleanup(deviation_result.bill, deviation_result.bill_doc_id)
+
+
+@pytest.mark.skipif(not TEST_ADDRESS, reason="TEST_GMAIL_ADDRESS not set")
+def test_run_bill_autonomously_sends_a_dispute_email_on_a_confirmed_vendor_error(monkeypatch):
+    # T43 milestone check (PRD S11 Demo Bill 2 / S7.4's "vendor error" worked
+    # example): a rate confirmed against this vendor's own last three
+    # invoices, with no other vendor moving on the same item in the same
+    # window -- the agent concludes a vendor-side pricing error, sends the
+    # dispute email itself (dispute_gate authorizes it), and notifies the
+    # pharmacist. Zero human involvement. Live Gemini + live Firestore +
+    # live Gmail send, same pattern as T38's own live-send test -- gated on
+    # TEST_GMAIL_ADDRESS so it doesn't fire on every run.
+    notify_calls = []
+    monkeypatch.setattr(
+        agent_tools.pharmacist_whatsapp_mod,
+        "notify_pharmacist",
+        lambda vendor, reference, message: notify_calls.append((vendor, reference, message))
+        or {"sent": True, "mode": "notify"},
+    )
+    monkeypatch.setattr(
+        agent_tools.pharmacist_whatsapp_mod,
+        "ask_pharmacist",
+        lambda vendor, reference, question: {"sent": True, "mode": "ask"},
+    )
+
+    vendor = "AT Dispute Investigation Vendor"
+    other_vendor = "AT Dispute Market Vendor"
+    item_name = "AT DISPUTE ITEM"
+    client = get_client()
+
+    seed_doc_ids: list[str] = []
+    for i, (date_iso, rate) in enumerate(
+        [("2026-05-15", 20.00), ("2026-06-15", 20.50), ("2026-07-15", 21.00)], start=1
+    ):
+        seed_bill = _history_bill(vendor, f"AT-DISP-HIST-{i}", date_iso, item_name, rate)
+        seed_doc_ids.extend(record_purchase(seed_bill, client=client))
+    # A second vendor, stable pricing on the same item within the 60-day
+    # cross-check window -- the "conclusive no market movement" signal PRD
+    # S7.5 condition 2 needs before an autonomous dispute can fire.
+    for date_iso in ("2026-07-01", "2026-08-01"):
+        market_bill = _history_bill(other_vendor, f"AT-DISP-MARKET-{date_iso}", date_iso, item_name, 15.00)
+        seed_doc_ids.extend(record_purchase(market_bill, client=client))
+
+    vendor_doc_id = vendor_directory_doc_id(vendor)
+    set_vendor_email(vendor, TEST_ADDRESS, client=client)
+    set_pharmacist_email(TEST_ADDRESS, client=client)
+
+    # ~28% above this vendor's own last rate (PRD S7.4 cites 26-27% moves),
+    # at a quantity that clears the ₹500 dispute floor.
+    deviation_data = _format_b_csv(
+        vendor, "AT-DISP-CURRENT", "28/08/2026", item_name, qty=200, rate=26.90, mrp=35.00
+    )
+
+    result = None
+    dispute_log_doc_id = None
+    try:
+        result = run_bill(deviation_data)
+
+        tools_called = [r.tool for r in result.tool_call_history]
+        assert "check_price_deviation" in tools_called
+        assert "cross_check_other_vendors" in tools_called
+        assert "send_dispute_email" in tools_called
+
+        assert result.bill is not None
+        assert result.status == RESOLVED
+
+        dispute_log_doc_id = email_log_doc_id(vendor, result.bill.invoice_no, "dispute")
+        log_doc = client.collection("email_log").document(dispute_log_doc_id).get()
+        assert log_doc.exists
+        log_data = log_doc.to_dict()
+        assert log_data["mode"] == "dispute"
+        assert log_data["to"] == TEST_ADDRESS
+        assert log_data["cc"] == TEST_ADDRESS
+
+        assert notify_calls  # pharmacist is told, even though no human acted
+
+        item = result.bill.line_items[0]
+        doc_id = ledger_doc_id(vendor, result.bill.invoice_no, item.item_name, item.batch_no)
+        assert purchase_ledger_collection(client).document(doc_id).get().exists
+    finally:
+        for doc_id in seed_doc_ids:
+            purchase_ledger_collection(client).document(doc_id).delete()
+        vendor_directory_collection(client).document(vendor_doc_id).delete()
+        if dispute_log_doc_id:
+            client.collection("email_log").document(dispute_log_doc_id).delete()
+        if result is not None:
+            _cleanup(result.bill, result.bill_doc_id)
 
 
 def test_run_bill_parks_on_turn_cap_exhaustion(monkeypatch):
