@@ -12,10 +12,11 @@ testing isn't locked out; every real deploy sets it.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, PlainTextResponse
 from google.auth.transport import requests as google_requests
 from google.oauth2 import id_token
 
@@ -23,6 +24,14 @@ from .ingest import handle_pubsub_push
 from .status_page import list_bills, render_status_page
 from .telemetry import project_id as gcp_project_id
 from .telemetry import setup_cloud_logging, setup_tracing
+from .whatsapp_webhook import (
+    extract_messages,
+    record_inbound_message,
+    verify_signature,
+    verify_subscription_token,
+    webhook_app_secret,
+    webhook_verify_token,
+)
 
 setup_tracing()
 setup_cloud_logging()
@@ -55,6 +64,36 @@ async def pubsub_push(request: Request) -> dict:
     # already-running event loop.
     results = await asyncio.to_thread(handle_pubsub_push, envelope)
     return {"processed": len(results)}
+
+
+@app.get("/whatsapp/webhook")
+def whatsapp_webhook_verify(request: Request) -> PlainTextResponse:
+    # T42/PRD S7.6: Meta's one-time subscribe handshake -- echo the challenge
+    # back only if the token matches the one configured in the Meta App
+    # Dashboard's webhook setup.
+    mode = request.query_params.get("hub.mode")
+    token = request.query_params.get("hub.verify_token")
+    challenge = request.query_params.get("hub.challenge", "")
+    if not verify_subscription_token(mode, token, webhook_verify_token()):
+        raise HTTPException(status_code=403, detail="webhook verification failed")
+    return PlainTextResponse(challenge)
+
+
+@app.post("/whatsapp/webhook")
+async def whatsapp_webhook_receive(request: Request) -> dict:
+    # Every inbound delivery is signed with the app secret (T42) -- same
+    # "verify the caller" guardrail as /pubsub/push, Meta's scheme instead
+    # of Google's OIDC one.
+    raw_body = await request.body()
+    if not verify_signature(webhook_app_secret(), raw_body, request.headers.get("x-hub-signature-256")):
+        raise HTTPException(status_code=401, detail="invalid webhook signature")
+    payload = json.loads(raw_body)
+    messages = extract_messages(payload)
+    recorded = 0
+    for message in messages:
+        if await asyncio.to_thread(record_inbound_message, message):
+            recorded += 1
+    return {"received": len(messages), "recorded": recorded}
 
 
 @app.get("/health")

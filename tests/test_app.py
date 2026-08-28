@@ -1,4 +1,6 @@
 import base64
+import hashlib
+import hmac
 import json
 
 from fastapi.testclient import TestClient
@@ -15,6 +17,34 @@ def _envelope(history_id="42"):
             "publishTime": "2026-08-25T00:00:00Z",
         },
         "subscription": "projects/pharmacy-bill-agent/subscriptions/gmail-notifications-push",
+    }
+
+
+def _whatsapp_payload(message_id="wamid.test1", from_number="15550001111", body="yes, approved"):
+    return {
+        "object": "whatsapp_business_account",
+        "entry": [
+            {
+                "id": "waba-id",
+                "changes": [
+                    {
+                        "value": {
+                            "messaging_product": "whatsapp",
+                            "messages": [
+                                {
+                                    "from": from_number,
+                                    "id": message_id,
+                                    "timestamp": "1700000000",
+                                    "type": "text",
+                                    "text": {"body": body},
+                                }
+                            ],
+                        },
+                        "field": "messages",
+                    }
+                ],
+            }
+        ],
     }
 
 
@@ -70,3 +100,71 @@ def test_push_rejects_invalid_bearer_token_when_audience_configured(monkeypatch)
         headers={"Authorization": "Bearer not-a-real-token"},
     )
     assert response.status_code == 401
+
+
+def test_whatsapp_webhook_verification_succeeds_with_matching_token(monkeypatch):
+    monkeypatch.setattr("pharmacy_agent.app.webhook_verify_token", lambda: "expected-token")
+    client = TestClient(app)
+    response = client.get(
+        "/whatsapp/webhook",
+        params={"hub.mode": "subscribe", "hub.verify_token": "expected-token", "hub.challenge": "12345"},
+    )
+    assert response.status_code == 200
+    assert response.text == "12345"
+
+
+def test_whatsapp_webhook_verification_rejects_wrong_token(monkeypatch):
+    monkeypatch.setattr("pharmacy_agent.app.webhook_verify_token", lambda: "expected-token")
+    client = TestClient(app)
+    response = client.get(
+        "/whatsapp/webhook",
+        params={"hub.mode": "subscribe", "hub.verify_token": "wrong", "hub.challenge": "12345"},
+    )
+    assert response.status_code == 403
+
+
+def test_whatsapp_webhook_receive_rejects_invalid_signature(monkeypatch):
+    monkeypatch.setattr("pharmacy_agent.app.webhook_app_secret", lambda: "test-secret")
+    client = TestClient(app)
+    response = client.post(
+        "/whatsapp/webhook",
+        json={"object": "whatsapp_business_account", "entry": []},
+        headers={"x-hub-signature-256": "sha256=deadbeef"},
+    )
+    assert response.status_code == 401
+
+
+def test_whatsapp_webhook_receive_rejects_missing_signature(monkeypatch):
+    monkeypatch.setattr("pharmacy_agent.app.webhook_app_secret", lambda: "test-secret")
+    client = TestClient(app)
+    response = client.post("/whatsapp/webhook", json={"object": "whatsapp_business_account", "entry": []})
+    assert response.status_code == 401
+
+
+def test_whatsapp_webhook_receive_records_valid_message(monkeypatch):
+    monkeypatch.setattr("pharmacy_agent.app.webhook_app_secret", lambda: "test-secret")
+    recorded = []
+    monkeypatch.setattr(
+        "pharmacy_agent.app.record_inbound_message",
+        lambda message: recorded.append(message) or True,
+    )
+
+    body = json.dumps(_whatsapp_payload()).encode("utf-8")
+    signature = "sha256=" + hmac.new(b"test-secret", body, hashlib.sha256).hexdigest()
+
+    client = TestClient(app)
+    response = client.post(
+        "/whatsapp/webhook",
+        content=body,
+        headers={"x-hub-signature-256": signature, "content-type": "application/json"},
+    )
+    assert response.status_code == 200
+    assert response.json() == {"received": 1, "recorded": 1}
+    assert recorded == [
+        {
+            "message_id": "wamid.test1",
+            "from": "15550001111",
+            "body": "yes, approved",
+            "timestamp": "1700000000",
+        }
+    ]
