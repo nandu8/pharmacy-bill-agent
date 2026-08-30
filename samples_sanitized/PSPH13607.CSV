@@ -1,0 +1,12 @@
+Type, Code, Name, Packing, Quantity, Free, Selling Rate, MRP, Batch No., Exp. Date, Discount, VAT %, VAT Amt, TS %, TS Amt, Cess, Amount,HSN,PTR ,RackNo
+H, Supplier,SUMMIT PHARMA
+H, Inv.No.,SPH13607
+H , Inv.Date,29/08/2026
+D,190001,MOODS ULTRA THIN 3'S,3,S,         5,         1,     25.00,     30.00,C01022,10/30,          ,          ,          ,          ,          ,          ,    125.00,40141010,     25.00,GN-3
+D,198017,BETADINE MICRO SOLUTION,100ML,         1,          ,     83.16,    103.95,MF03926,05/28,          ,      5.00,      4.16,          ,          ,          ,     83.16,30049087,     83.16,K-30
+D,401007,AMIXIDE -H,10S,         3,          ,     47.86,     62.81,SIG2601A,11/27,          ,      5.00,      7.18,          ,          ,          ,    143.58,30049099,     47.86,SN-2
+D,418010,CARDIVAS 3.125MG,15'S,         3,          ,     67.05,     88.00,SIH1224A,05/29,          ,      5.00,     10.06,          ,          ,          ,    201.15,30049079,     67.05,SN-8
+D,104045,K-PIO TAB 15MG,15TAB,        10,          ,     27.14,     35.62,ZAJB2603,07/27,          ,      5.00,     13.56,          ,          ,          ,    271.40,30049099,     27.14,E-2
+D,106159,TENEBLU-M TAB,15TAB,         5,          ,     90.29,    118.50,ZABQ2607,11/27,          ,      5.00,     22.58,          ,          ,          ,    451.45,30049099,     90.29,E-20
+D,160021,DOLO  TAB  650 **,15TAB,        10,         2,     24.59,     32.28,DOBS4467,04/30,          ,      5.00,     12.30,          ,          ,          ,    245.90,30049061,     24.59,A-4
+F, Bill Amount,     1591.00

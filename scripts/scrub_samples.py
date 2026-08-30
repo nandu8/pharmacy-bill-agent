@@ -81,9 +81,20 @@ def scrub_pdf(src: Path, dst: Path) -> None:
         page.apply_redactions()
         for rect, new in pending:
             fontsize = max(4.0, min(9.0, rect.height * 0.75))
-            page.insert_textbox(
+            # insert_textbox wraps on spaces; a narrow rect can force a
+            # multi-word replacement onto more lines than the (single-line)
+            # rect is tall enough for, in which case it silently draws
+            # nothing at all and returns a negative "shortage" value.
+            # Shrink until it actually fits rather than lose the
+            # replacement text.
+            rc = page.insert_textbox(
                 rect, new, fontsize=fontsize, fontname="helv", color=(0, 0, 0)
             )
+            while rc < 0 and fontsize > 3.0:
+                fontsize -= 0.5
+                rc = page.insert_textbox(
+                    rect, new, fontsize=fontsize, fontname="helv", color=(0, 0, 0)
+                )
     doc.save(dst)
     doc.close()
 
