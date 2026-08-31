@@ -58,6 +58,28 @@ def test_format_c_xls_all_samples_parse_and_validate():
         assert issues == [], f"{f.name}: {issues}"
 
 
+def test_format_c_xls_scheme_discount_reduces_taxable_value():
+    # _26_I_26000730016526.xls carries per-line *scheme* discounts
+    # (`invscdis`) on two lines -- ASTHALIN RESP (20.10) and DICLOTAL FORTE
+    # GEL (97.90) -- separate from the ordinary `invdisc` column. The
+    # normalizer must subtract both, or the summed line totals overshoot the
+    # invoice's own 1449.00 footer (T19 gap surfaced by T12's samples).
+    data = (SAMPLES_DIR / "_26_I_26000730016526.xls").read_bytes()
+    rows = parse_format_c_xls(data)
+    bill = build_bill_from_format_a_rows(rows, vendor="Northfield Associates", source_format="format_c")
+
+    by_name = {li.item_name.strip(): li for li in bill.line_items}
+    asthalin = by_name["ASTHALIN RESP 2.5ML(5X1)"]
+    assert asthalin.discount == 20.10
+    assert asthalin.taxable_value == round(30 * 6.7 - 20.10, 2)  # 180.90
+
+    diclotal = by_name["DICLOTAL FORTE GEL 30GM"]
+    assert diclotal.discount == 97.90
+    assert diclotal.taxable_value == round(2 * 97.9 - 97.90, 2)  # 97.90
+
+    assert validate_bill(bill) == []
+
+
 def test_format_c_xls_line_total_matches_pdf_twin():
     # samples/002652_..._152516.xls line 1 (SILVEREX SSD CREAM 20GM):
     # taxable 148.57, CGST 3.71, SGST 3.71, line_total 155.99 -- verified

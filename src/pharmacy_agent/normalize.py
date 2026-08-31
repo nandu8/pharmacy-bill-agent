@@ -47,7 +47,12 @@ def normalize_format_a_row(row: dict[str, str], vendor: str, source_format: str 
     """
     qty = _num(row.get("invqty"))
     rate = _num(row.get("salerate"))
-    discount = _num(row.get("invdisc"))
+    # Two independent per-line discount columns in this schema: the ordinary
+    # trade discount (`invdisc`) and a scheme/bonus discount (`invscdis`,
+    # e.g. a "buy N get M" allowance booked as a rupee value). Real samples
+    # carry `invscdis` with `invdisc` zero -- both must come off the taxable
+    # value or the summed line totals overshoot the invoice footer.
+    discount = round(_num(row.get("invdisc")) + _num(row.get("invscdis")), 2)
     taxable_value = round(qty * rate - discount, 2)
 
     cgst_rate = _num(row.get("cgstper"))
