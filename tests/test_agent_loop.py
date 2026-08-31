@@ -1,12 +1,20 @@
+import hashlib
+import hmac
+import json
 import os
+import time
 
 import pytest
+
+from fastapi.testclient import TestClient
 
 from conftest import SAMPLES_DIR
 
 from pharmacy_agent.agent import tools as agent_tools
 from pharmacy_agent.agent.loop import resume_bill, resume_bill_with_file, run_bill
 from pharmacy_agent.agent.terminal import PENDING_PHARMACIST, PENDING_VENDOR, RESOLVED
+from pharmacy_agent.app import app
+from pharmacy_agent.firestore_client import whatsapp_inbound_collection
 from pharmacy_agent.email_vendor import email_log_doc_id
 from pharmacy_agent.firestore_client import (
     agent_runs_collection,
@@ -410,6 +418,108 @@ def test_resume_bill_continues_a_parked_run_to_resolution(monkeypatch):
 
 def test_resume_bill_returns_none_for_an_unknown_agent_run_id():
     assert resume_bill("no-such-agent-run", "any reply") is None
+
+
+def _whatsapp_reply_payload(message_id: str, body: str) -> dict:
+    return {
+        "object": "whatsapp_business_account",
+        "entry": [
+            {
+                "id": "waba-id",
+                "changes": [
+                    {
+                        "field": "messages",
+                        "value": {
+                            "messaging_product": "whatsapp",
+                            "messages": [
+                                {
+                                    "from": "15550009999",
+                                    "id": message_id,
+                                    "timestamp": str(int(time.time())),
+                                    "type": "text",
+                                    "text": {"body": body},
+                                }
+                            ],
+                        },
+                    }
+                ],
+            }
+        ],
+    }
+
+
+def test_demo_bill_4_parks_then_resumes_via_the_whatsapp_webhook(monkeypatch):
+    # T47 milestone check (PRD S11 Demo Bill 4): a bill parks on a
+    # confirmed-but-unresolved price deviation, then -- minutes or days
+    # later, a stateless container away -- the pharmacist's WhatsApp reply
+    # arrives through the *real* inbound webhook (signature-verified POST ->
+    # extract_messages -> record_inbound_message dedup -> find_resumable_run
+    # -> resume_bill), and the bill goes pending_pharmacist -> resolved on
+    # Firestore with the purchase recorded. Unlike T45's test, which calls
+    # resume_bill() directly, this drives the whole HTTP entrypoint that a
+    # Meta webhook delivery actually hits.
+    _stub_pharmacist_whatsapp(monkeypatch)
+    monkeypatch.setattr("pharmacy_agent.app.webhook_app_secret", lambda: "t47-test-secret")
+
+    vendor = "AT Demo4 Vendor"
+    item_name = "AT DEMO4 ITEM"
+    client = get_client()
+    seed_doc_ids: list[str] = []
+    for i, (date_iso, rate) in enumerate(
+        [("2026-05-15", 20.00), ("2026-06-15", 20.50), ("2026-07-15", 21.00)], start=1
+    ):
+        seed_bill = _history_bill(vendor, f"AT-DEMO4-HIST-{i}", date_iso, item_name, rate)
+        seed_doc_ids.extend(record_purchase(seed_bill, client=client))
+
+    deviation_data = _format_b_csv(
+        vendor, "AT-DEMO4-CURRENT", "20/08/2026", item_name, qty=10, rate=27.00, mrp=35.00
+    )
+    message_id = f"wamid.t47-{int(time.time() * 1000)}"
+
+    parked_result = None
+    try:
+        parked_result = run_bill(deviation_data)
+        assert parked_result.status == PENDING_PHARMACIST
+        bill_doc_id = parked_result.bill_doc_id
+        assert (
+            bills_collection(client).document(bill_doc_id).get().to_dict()["status"]
+            == PENDING_PHARMACIST
+        )
+
+        body = json.dumps(
+            _whatsapp_reply_payload(message_id, "Yes, that rate is correct -- please record it.")
+        ).encode("utf-8")
+        signature = "sha256=" + hmac.new(b"t47-test-secret", body, hashlib.sha256).hexdigest()
+
+        response = TestClient(app).post(
+            "/whatsapp/webhook",
+            content=body,
+            headers={"x-hub-signature-256": signature, "content-type": "application/json"},
+        )
+        assert response.status_code == 200
+        assert response.json() == {"received": 1, "recorded": 1, "resumed": 1}
+
+        bill_doc = bills_collection(client).document(bill_doc_id).get().to_dict()
+        assert bill_doc["status"] == RESOLVED
+
+        run_doc = agent_runs_collection(client).document(bill_doc_id).get().to_dict()
+        assert run_doc["resumed_at"] is not None
+
+        assert parked_result.bill is not None
+        for item in parked_result.bill.line_items:
+            doc_id = ledger_doc_id(
+                parked_result.bill.vendor, parked_result.bill.invoice_no, item.item_name, item.batch_no
+            )
+            assert purchase_ledger_collection(client).document(doc_id).get().exists
+    finally:
+        for doc_id in seed_doc_ids:
+            purchase_ledger_collection(client).document(doc_id).delete()
+        whatsapp_inbound_collection(client).document(message_id).delete()
+        pharmacist_resolutions_collection(client).document(
+            resolution_doc_id(vendor, item_name)
+        ).delete()
+        if parked_result is not None:
+            _cleanup(parked_result.bill, parked_result.bill_doc_id)
 
 
 def test_resume_bill_with_file_reparses_a_vendor_resend_to_resolution(monkeypatch):
